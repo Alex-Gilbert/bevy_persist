@@ -1,0 +1,36 @@
+name: Check MSRV
+
+on:
+  schedule:
+    # Run weekly to check if MSRV still works
+    - cron: '0 0 * * 1'
+  workflow_dispatch:
+
+jobs:
+  check-msrv:
+    name: Check Minimum Supported Rust Version
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        rust: [1.75.0, 1.76.0, 1.77.0, 1.78.0, 1.79.0, stable]
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+      
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv-${{ matrix.rust }}
+      
+      - name: Check compilation
+        run: |
+          cargo check --workspace --all-features
+          cargo check --workspace --no-default-features
+      
+      - name: Report results
+        if: failure()
+        run: |
+          echo "MSRV check failed for Rust ${{ matrix.rust }}"
+          echo "Consider updating the MSRV in Cargo.toml and CI workflows"

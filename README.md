@@ -57,6 +57,24 @@ cargo run --example basic
 cargo run --example advanced
 ```
 
+## CI/CD
+
+[![CI](https://github.com/Alex-Gilbert/bevy_persist/actions/workflows/ci.yml/badge.svg)](https://github.com/Alex-Gilbert/bevy_persist/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/Alex-Gilbert/bevy_persist/branch/main/graph/badge.svg)](https://codecov.io/gh/Alex-Gilbert/bevy_persist)
+[![Crates.io](https://img.shields.io/crates/v/bevy_persist.svg)](https://crates.io/crates/bevy_persist)
+[![Documentation](https://docs.rs/bevy_persist/badge.svg)](https://docs.rs/bevy_persist)
+[![License](https://img.shields.io/crates/l/bevy_persist.svg)](./LICENSE-MIT)
+
+This project uses GitHub Actions for continuous integration:
+
+- **Pull Requests**: Automatically runs formatting, linting, tests, and security checks
+- **Releases**: Automated publishing to crates.io when tags are pushed
+- **Dependencies**: Automated dependency updates via Dependabot
+
+## Contributing
+
+Contributions are welcome! Please see [CONTRIBUTING.md](.github/CONTRIBUTING.md) for guidelines.
+
 ## License
 
 Licensed under either of:

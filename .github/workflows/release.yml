@@ -1,0 +1,143 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g., 0.1.0)'
+        required: true
+        type: string
+
+jobs:
+  # First, run all CI checks
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  # Create GitHub release
+  create-release:
+    name: Create Release
+    needs: ci
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Determine version
+        id: version
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION=${GITHUB_REF#refs/tags/v}
+          fi
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Version: ${VERSION}"
+      
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # Extract the changelog for this version
+          VERSION="${{ steps.version.outputs.version }}"
+          CHANGELOG=$(awk '/^## \['"$VERSION"'\]/{flag=1;next}/^## \[/{flag=0}flag' CHANGELOG.md || echo "Release $VERSION")
+          echo "changelog<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGELOG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: Release v${{ steps.version.outputs.version }}
+          body: ${{ steps.changelog.outputs.changelog }}
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.version, '-') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Publish to crates.io
+  publish-derive:
+    name: Publish bevy_persist_derive
+    needs: create-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: dtolnay/rust-toolchain@stable
+      
+      - name: Update version in Cargo.toml
+        run: |
+          VERSION="${{ needs.create-release.outputs.version }}"
+          sed -i "s/^version = .*/version = \"$VERSION\"/" bevy_persist_derive/Cargo.toml
+      
+      - name: Publish to crates.io
+        run: |
+          cd bevy_persist_derive
+          cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  publish-main:
+    name: Publish bevy_persist
+    needs: [create-release, publish-derive]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: dtolnay/rust-toolchain@stable
+      
+      - name: Update versions in Cargo.toml
+        run: |
+          VERSION="${{ needs.create-release.outputs.version }}"
+          # Update main crate version
+          sed -i "s/^version = .*/version = \"$VERSION\"/" bevy_persist/Cargo.toml
+          # Update dependency version for derive crate
+          sed -i "s/bevy_persist_derive = { version = \"[^\"]*\"/bevy_persist_derive = { version = \"$VERSION\"/" bevy_persist/Cargo.toml
+      
+      - name: Wait for derive crate to be available
+        run: |
+          VERSION="${{ needs.create-release.outputs.version }}"
+          for i in {1..30}; do
+            if cargo search bevy_persist_derive | grep -q "^bevy_persist_derive = \"$VERSION\""; then
+              echo "bevy_persist_derive $VERSION is available on crates.io"
+              break
+            fi
+            echo "Waiting for bevy_persist_derive to be available (attempt $i/30)..."
+            sleep 10
+          done
+      
+      - name: Publish to crates.io
+        run: |
+          cd bevy_persist
+          cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # Update documentation after release
+  update-docs:
+    name: Update Documentation
+    needs: [publish-main]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'  # Only on tag push, not manual dispatch
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      
+      - name: Update version in README
+        run: |
+          VERSION="${{ needs.create-release.outputs.version }}"
+          sed -i "s/bevy_persist = \"[^\"]*\"/bevy_persist = \"$VERSION\"/" README.md
+          sed -i "s/bevy_persist = \"[^\"]*\"/bevy_persist = \"$VERSION\"/" bevy_persist/README.md
+      
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v6
+        with:
+          title: "chore: update version to ${{ needs.create-release.outputs.version }}"
+          body: "Updates documentation to reference version ${{ needs.create-release.outputs.version }}"
+          commit-message: "chore: update version to ${{ needs.create-release.outputs.version }}"
+          branch: update-version-${{ needs.create-release.outputs.version }}
+          delete-branch: true

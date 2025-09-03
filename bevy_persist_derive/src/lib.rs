@@ -57,7 +57,7 @@ fn impl_persist(input: &DeriveInput) -> SynResult<proc_macro2::TokenStream> {
                 data
             }
 
-            fn from_persist_data(&mut self, data: &bevy_persist::PersistData) {
+            fn load_from_persist_data(&mut self, data: &bevy_persist::PersistData) {
                 if let Ok(value) = serde_json::to_value(&data.values) {
                     if let Ok(new_self) = serde_json::from_value(value) {
                         *self = new_self;

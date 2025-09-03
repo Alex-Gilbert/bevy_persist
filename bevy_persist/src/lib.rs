@@ -80,7 +80,7 @@ impl std::fmt::Display for PersistError {
 impl std::error::Error for PersistError {}
 
 /// Data structure for persisting parameter values.
-/// 
+///
 /// This is used internally to store serialized resource data
 /// in a generic format that can be saved to JSON or RON.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,7 +118,7 @@ impl Default for PersistData {
 }
 
 /// Complete persistence file format.
-/// 
+///
 /// This represents the entire contents of a persistence file,
 /// including all persisted resources, metadata, and versioning information.
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -152,12 +152,13 @@ impl PersistFile {
             .map_err(|e| PersistError::IoError(format!("Failed to read file: {}", e)))?;
 
         // Try RON first, fallback to JSON
-        if path.extension().map_or(false, |ext| ext == "ron") {
+        if path.extension().is_some_and(|ext| ext == "ron") {
             ron::from_str(&content)
                 .map_err(|e| PersistError::SerializationError(format!("RON parse error: {}", e)))
         } else {
-            serde_json::from_str(&content)
-                .map_err(|e| PersistError::SerializationError(format!("JSON parse error: {}", e)))
+            serde_json::from_str(&content).map_err(|e| {
+                PersistError::SerializationError(format!("JSON parse error: {}", e))
+            })
         }
     }
 
@@ -175,7 +176,7 @@ impl PersistFile {
                 .map_err(|e| PersistError::IoError(format!("Failed to create directory: {}", e)))?;
         }
 
-        let content = if path.extension().map_or(false, |ext| ext == "ron") {
+        let content = if path.extension().is_some_and(|ext| ext == "ron") {
             ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::default()).map_err(|e| {
                 PersistError::SerializationError(format!("RON serialization error: {}", e))
             })?
@@ -204,7 +205,7 @@ impl PersistFile {
 }
 
 /// Trait for types that can be persisted.
-/// 
+///
 /// This trait is typically implemented automatically by the `#[derive(Persist)]` macro.
 /// Manual implementation is possible but not recommended.
 pub trait Persistable: Resource + Serialize + for<'de> Deserialize<'de> {
@@ -215,11 +216,11 @@ pub trait Persistable: Resource + Serialize + for<'de> Deserialize<'de> {
     fn to_persist_data(&self) -> PersistData;
 
     /// Load from persistence data
-    fn from_persist_data(&mut self, data: &PersistData);
+    fn load_from_persist_data(&mut self, data: &PersistData);
 }
 
 /// Registration data for auto-discovered Persist types.
-/// 
+///
 /// Used internally by the derive macro for automatic registration.
 #[derive(Debug)]
 pub struct PersistRegistration {
@@ -231,7 +232,7 @@ pub struct PersistRegistration {
 inventory::collect!(PersistRegistration);
 
 /// Resource that manages persistence.
-/// 
+///
 /// This resource is automatically added by `PersistPlugin` and handles
 /// all saving and loading operations for persistent resources.
 #[derive(Resource)]
@@ -296,12 +297,12 @@ impl PersistManager {
 }
 
 /// Plugin for automatic persistence.
-/// 
+///
 /// Add this plugin to your Bevy app to enable automatic persistence
 /// for resources marked with `#[derive(Persist)]`.
-/// 
+///
 /// # Example
-/// 
+///
 /// ```ignore
 /// app.add_plugins(PersistPlugin::default());
 /// // Or with custom file path:
@@ -355,10 +356,13 @@ impl Plugin for PersistPlugin {
 }
 
 /// Register a Persist type with the system.
-/// 
+///
 /// This is called automatically by the derive macro and typically
 /// doesn't need to be called manually.
-pub fn register_persist_type<T: Resource + Persistable + Default>(app: &mut App, auto_save: bool) {
+pub fn register_persist_type<T: Resource + Persistable + Default>(
+    app: &mut App,
+    auto_save: bool,
+) {
     let type_name = T::type_name();
 
     let world = app.world_mut();
@@ -401,7 +405,252 @@ pub fn persist_system<T: Persistable>(mut manager: ResMut<PersistManager>, resou
 /// Load persisted values on startup
 pub fn load_persisted<T: Persistable>(manager: Res<PersistManager>, mut resource: ResMut<T>) {
     if let Some(data) = manager.get_persist_file().get_type_data(T::type_name()) {
-        resource.from_persist_data(data);
+        resource.load_from_persist_data(data);
         info!("Loaded persisted data for {}", T::type_name());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_persist_data_insert_and_get() {
+        let mut data = PersistData::new();
+        
+        // Test inserting and retrieving different types
+        data.insert("number", 42i32);
+        data.insert("text", "hello");
+        data.insert("float", 3.14f64);
+        
+        assert_eq!(data.get::<i32>("number"), Some(42));
+        assert_eq!(data.get::<String>("text"), Some("hello".to_string()));
+        assert_eq!(data.get::<f64>("float"), Some(3.14));
+        assert_eq!(data.get::<i32>("nonexistent"), None);
+    }
+
+    #[test]
+    fn test_persist_data_complex_types() {
+        #[derive(Serialize, Deserialize, Debug, PartialEq)]
+        struct TestStruct {
+            name: String,
+            value: i32,
+        }
+
+        let mut data = PersistData::new();
+        let test_struct = TestStruct {
+            name: "test".to_string(),
+            value: 100,
+        };
+        
+        data.insert("struct", &test_struct);
+        
+        let retrieved = data.get::<TestStruct>("struct");
+        assert_eq!(retrieved, Some(test_struct));
+    }
+
+    #[test]
+    fn test_persist_file_new() {
+        let file = PersistFile::new();
+        
+        assert!(file.type_data.is_empty());
+        assert!(!file.last_saved.is_empty());
+        assert_eq!(file.version, env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn test_persist_file_type_data() {
+        let mut file = PersistFile::new();
+        let mut data = PersistData::new();
+        data.insert("test_key", "test_value");
+        
+        file.set_type_data("TestType".to_string(), data.clone());
+        
+        let retrieved = file.get_type_data("TestType");
+        assert!(retrieved.is_some());
+        assert_eq!(retrieved.unwrap().get::<String>("test_key"), Some("test_value".to_string()));
+        
+        assert!(file.get_type_data("NonExistent").is_none());
+    }
+
+    #[test]
+    fn test_persist_file_save_and_load_json() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("test.json");
+        
+        // Create and save a file
+        let mut file = PersistFile::new();
+        let mut data = PersistData::new();
+        data.insert("key1", "value1");
+        data.insert("key2", 42);
+        file.set_type_data("TestResource".to_string(), data);
+        
+        file.save_to_file(&file_path).unwrap();
+        
+        // Load the file back
+        let loaded = PersistFile::load_from_file(&file_path).unwrap();
+        
+        assert_eq!(loaded.type_data.len(), 1);
+        let loaded_data = loaded.get_type_data("TestResource").unwrap();
+        assert_eq!(loaded_data.get::<String>("key1"), Some("value1".to_string()));
+        assert_eq!(loaded_data.get::<i32>("key2"), Some(42));
+    }
+
+    #[test]
+    fn test_persist_file_save_and_load_ron() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("test.ron");
+        
+        // Create and save a file
+        let mut file = PersistFile::new();
+        let mut data = PersistData::new();
+        data.insert("name", "Ron Test");
+        data.insert("count", 100);
+        file.set_type_data("RonResource".to_string(), data);
+        
+        file.save_to_file(&file_path).unwrap();
+        
+        // Load the file back
+        let loaded = PersistFile::load_from_file(&file_path).unwrap();
+        
+        assert_eq!(loaded.type_data.len(), 1);
+        let loaded_data = loaded.get_type_data("RonResource").unwrap();
+        assert_eq!(loaded_data.get::<String>("name"), Some("Ron Test".to_string()));
+        assert_eq!(loaded_data.get::<i32>("count"), Some(100));
+    }
+
+    #[test]
+    fn test_persist_file_load_nonexistent() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("nonexistent.json");
+        
+        // Should return a new file when loading nonexistent
+        let file = PersistFile::load_from_file(&file_path).unwrap();
+        assert!(file.type_data.is_empty());
+    }
+
+    #[test]
+    fn test_persist_manager_new() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("manager_test.json");
+        
+        let manager = PersistManager::new(&file_path);
+        
+        assert_eq!(manager.file_path, file_path);
+        assert!(manager.auto_save);
+        assert!(manager.auto_save_types.is_empty());
+    }
+
+    #[test]
+    fn test_persist_manager_auto_save_settings() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("auto_save_test.json");
+        
+        let mut manager = PersistManager::new(&file_path);
+        
+        // Test default auto-save
+        assert!(manager.is_auto_save_enabled("AnyType"));
+        
+        // Disable auto-save for specific type
+        manager.set_type_auto_save("DisabledType".to_string(), false);
+        assert!(!manager.is_auto_save_enabled("DisabledType"));
+        assert!(manager.is_auto_save_enabled("EnabledType"));
+        
+        // Disable global auto-save
+        manager.auto_save = false;
+        assert!(!manager.is_auto_save_enabled("AnyType"));
+    }
+
+    #[test]
+    fn test_persist_manager_save_and_load() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("manager_save_load.json");
+        
+        // Create manager and add data
+        let mut manager = PersistManager::new(&file_path);
+        let mut data = PersistData::new();
+        data.insert("test", "data");
+        manager.get_persist_file_mut().set_type_data("TestType".to_string(), data);
+        
+        // Save
+        manager.save().unwrap();
+        
+        // Create new manager and verify data persists
+        let manager2 = PersistManager::new(&file_path);
+        let loaded_data = manager2.get_persist_file().get_type_data("TestType");
+        assert!(loaded_data.is_some());
+        assert_eq!(loaded_data.unwrap().get::<String>("test"), Some("data".to_string()));
+    }
+
+    #[test]
+    fn test_persist_error_display() {
+        let io_error = PersistError::IoError("file not found".to_string());
+        assert_eq!(format!("{}", io_error), "IO error: file not found");
+        
+        let ser_error = PersistError::SerializationError("invalid JSON".to_string());
+        assert_eq!(format!("{}", ser_error), "Serialization error: invalid JSON");
+        
+        let res_error = PersistError::ResourceNotFound("MyResource".to_string());
+        assert_eq!(format!("{}", res_error), "Resource not found: MyResource");
+    }
+
+    #[test]
+    fn test_persist_plugin_default() {
+        let plugin = PersistPlugin::default();
+        assert_eq!(plugin.file_path, "settings.ron");
+        assert!(plugin.auto_save);
+    }
+
+    #[test]
+    fn test_persist_plugin_custom() {
+        let plugin = PersistPlugin::new("custom.json")
+            .with_auto_save(false);
+        assert_eq!(plugin.file_path, "custom.json");
+        assert!(!plugin.auto_save);
+    }
+
+    #[test]
+    fn test_persist_data_default() {
+        let data = PersistData::default();
+        assert!(data.values.is_empty());
+    }
+
+    #[test]
+    fn test_persist_file_format_detection() {
+        let temp_dir = TempDir::new().unwrap();
+        
+        // Test JSON format
+        let json_path = temp_dir.path().join("test.json");
+        let mut json_file = PersistFile::new();
+        let mut data = PersistData::new();
+        data.insert("test_key", "test_value");
+        json_file.set_type_data("TestType".to_string(), data.clone());
+        json_file.save_to_file(&json_path).unwrap();
+        let content = fs::read_to_string(&json_path).unwrap();
+        assert!(content.starts_with('{'), "JSON should start with {{");
+        assert!(content.contains("\"TestType\""), "JSON should contain TestType");
+        
+        // Test RON format
+        let ron_path = temp_dir.path().join("test.ron");
+        let mut ron_file = PersistFile::new();
+        ron_file.set_type_data("TestType".to_string(), data);
+        ron_file.save_to_file(&ron_path).unwrap();
+        let ron_content = fs::read_to_string(&ron_path).unwrap();
+        
+        // RON and JSON will have different formatting
+        // Just verify both can be loaded back correctly
+        let loaded_json = PersistFile::load_from_file(&json_path).unwrap();
+        let loaded_ron = PersistFile::load_from_file(&ron_path).unwrap();
+        
+        assert!(loaded_json.get_type_data("TestType").is_some());
+        assert!(loaded_ron.get_type_data("TestType").is_some());
+        
+        let json_data = loaded_json.get_type_data("TestType").unwrap();
+        let ron_data = loaded_ron.get_type_data("TestType").unwrap();
+        
+        assert_eq!(json_data.get::<String>("test_key"), Some("test_value".to_string()));
+        assert_eq!(ron_data.get::<String>("test_key"), Some("test_value".to_string()));
     }
 }

@@ -24,6 +24,7 @@ bevy_persist_derive = { version = "0.1.0", path = "../bevy_persist_derive" }
 
 [dev-dependencies]
 bevy = { workspace = true, features = ["default"] }
+tempfile = { workspace = true }
 
 [[example]]
 name = "basic"
