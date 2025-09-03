@@ -40,6 +40,11 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "prod")]
+use directories::ProjectDirs;
+#[cfg(feature = "secure")]
+use sha2::{Digest, Sha256};
+
 // Re-export the derive macro
 pub use bevy_persist_derive::Persist;
 
@@ -48,8 +53,8 @@ pub use inventory;
 
 pub mod prelude {
     pub use crate::{
-        Persist, PersistData, PersistError, PersistFile, PersistManager, PersistPlugin,
-        PersistResult, Persistable,
+        Persist, PersistData, PersistError, PersistFile, PersistManager, PersistMode,
+        PersistPlugin, PersistResult, Persistable,
     };
 }
 
@@ -203,6 +208,19 @@ impl PersistFile {
     }
 }
 
+/// Persistence mode for a resource
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersistMode {
+    /// Development mode - saves to local files for tweaking
+    Dev,
+    /// Embed mode - values are compiled into the binary
+    Embed,
+    /// Dynamic mode - user settings that persist across runs
+    Dynamic,
+    /// Secure mode - encrypted/obfuscated save data
+    Secure,
+}
+
 /// Trait for types that can be persisted.
 ///
 /// This trait is typically implemented automatically by the `#[derive(Persist)]` macro.
@@ -210,6 +228,16 @@ impl PersistFile {
 pub trait Persistable: Resource + Serialize + for<'de> Deserialize<'de> {
     /// Get the type name for persistence
     fn type_name() -> &'static str;
+
+    /// Get the persistence mode
+    fn persist_mode() -> PersistMode {
+        PersistMode::Dev
+    }
+
+    /// Get embedded data if available
+    fn embedded_data() -> Option<&'static str> {
+        None
+    }
 
     /// Convert to persistence data
     fn to_persist_data(&self) -> PersistData;
@@ -224,6 +252,7 @@ pub trait Persistable: Resource + Serialize + for<'de> Deserialize<'de> {
 #[derive(Debug)]
 pub struct PersistRegistration {
     pub type_name: &'static str,
+    pub persist_mode: &'static str,
     pub auto_save: bool,
     pub register_fn: fn(&mut App),
 }
@@ -236,42 +265,125 @@ inventory::collect!(PersistRegistration);
 /// all saving and loading operations for persistent resources.
 #[derive(Resource)]
 pub struct PersistManager {
-    /// Path to the persistence file
-    pub file_path: PathBuf,
+    /// Development file path (only used when not in production mode)
+    #[cfg(not(feature = "prod"))]
+    pub dev_file: PathBuf,
+    /// Application info for platform-specific paths
+    pub app_name: String,
+    pub organization: String,
     /// Cached persist file
     persist_file: PersistFile,
     /// Whether auto-save is enabled globally
     pub auto_save: bool,
     /// Track which types have auto-save enabled
     auto_save_types: HashMap<String, bool>,
+    /// Track persistence modes for types
+    persist_modes: HashMap<String, PersistMode>,
 }
 
 impl PersistManager {
-    /// Creates a new PersistManager with the specified file path.
-    pub fn new(file_path: impl Into<PathBuf>) -> Self {
-        let file_path = file_path.into();
-        let persist_file = PersistFile::load_from_file(&file_path).unwrap_or_else(|e| {
-            error!("Failed to load persist file: {}", e);
+    /// Creates a new PersistManager.
+    pub fn new(organization: impl Into<String>, app_name: impl Into<String>) -> Self {
+        let organization = organization.into();
+        let app_name = app_name.into();
+        
+        // In dev mode, load from the dev file if it exists
+        #[cfg(not(feature = "prod"))]
+        let dev_file = PathBuf::from(format!("{}_dev.ron", app_name.to_lowercase().replace(" ", "_")));
+        
+        #[cfg(not(feature = "prod"))]
+        let persist_file = PersistFile::load_from_file(&dev_file).unwrap_or_else(|e| {
+            debug!("No existing dev file found: {}", e);
             PersistFile::new()
         });
+        
+        #[cfg(feature = "prod")]
+        let persist_file = PersistFile::new();
 
         Self {
-            file_path,
+            #[cfg(not(feature = "prod"))]
+            dev_file,
+            app_name,
+            organization,
             persist_file,
             auto_save: true,
             auto_save_types: HashMap::new(),
+            persist_modes: HashMap::new(),
+        }
+    }
+
+    /// Get the appropriate path for a resource based on its mode
+    pub fn get_resource_path(&self, type_name: &str, mode: PersistMode) -> PathBuf {
+        #[cfg(feature = "prod")]
+        {
+            match mode {
+                PersistMode::Dev => {
+                    // In production, dev mode resources shouldn't exist
+                    // But if they do, save to a local file as fallback
+                    PathBuf::from(format!("{}_dev.ron", self.app_name.to_lowercase().replace(" ", "_")))
+                }
+                PersistMode::Dynamic => {
+                    if let Some(proj_dirs) = ProjectDirs::from("", &self.organization, &self.app_name) {
+                        let config_dir = proj_dirs.config_dir();
+                        fs::create_dir_all(config_dir).ok();
+                        config_dir.join(format!("{}.ron", type_name.to_lowercase()))
+                    } else {
+                        // Fallback to current directory if platform dirs unavailable
+                        PathBuf::from(format!("{}.ron", type_name.to_lowercase()))
+                    }
+                }
+                PersistMode::Secure => {
+                    if let Some(proj_dirs) = ProjectDirs::from("", &self.organization, &self.app_name) {
+                        let data_dir = proj_dirs.data_dir();
+                        fs::create_dir_all(data_dir).ok();
+                        data_dir.join(format!("{}.dat", type_name.to_lowercase()))
+                    } else {
+                        // Fallback to current directory if platform dirs unavailable
+                        PathBuf::from(format!("{}.dat", type_name.to_lowercase()))
+                    }
+                }
+                PersistMode::Embed => {
+                    // Embedded resources don't save to disk in prod
+                    PathBuf::new()
+                }
+            }
+        }
+        #[cfg(not(feature = "prod"))]
+        {
+            // In dev mode, everything goes to the dev file
+            let _ = (type_name, mode); // Suppress warnings
+            self.dev_file.clone()
         }
     }
 
     /// Saves all persistent data to the file.
     pub fn save(&mut self) -> PersistResult<()> {
-        self.persist_file.save_to_file(&self.file_path)
+        #[cfg(not(feature = "prod"))]
+        return self.persist_file.save_to_file(&self.dev_file);
+        
+        #[cfg(feature = "prod")]
+        {
+            // In production, this is only used as a fallback for dev mode resources
+            let fallback_path = PathBuf::from(format!("{}_dev.ron", self.app_name.to_lowercase().replace(" ", "_")));
+            self.persist_file.save_to_file(&fallback_path)
+        }
     }
 
     /// Reloads persistent data from the file.
     pub fn load(&mut self) -> PersistResult<()> {
-        self.persist_file = PersistFile::load_from_file(&self.file_path)?;
-        Ok(())
+        #[cfg(not(feature = "prod"))]
+        {
+            self.persist_file = PersistFile::load_from_file(&self.dev_file)?;
+            Ok(())
+        }
+        
+        #[cfg(feature = "prod")]
+        {
+            // In production, this would only be called for fallback scenarios
+            let fallback_path = PathBuf::from(format!("{}_dev.ron", self.app_name.to_lowercase().replace(" ", "_")));
+            self.persist_file = PersistFile::load_from_file(&fallback_path)?;
+            Ok(())
+        }
     }
 
     /// Gets a reference to the underlying persist file.
@@ -293,6 +405,16 @@ impl PersistManager {
     pub fn set_type_auto_save(&mut self, type_name: String, enabled: bool) {
         self.auto_save_types.insert(type_name, enabled);
     }
+
+    /// Sets the persistence mode for a specific type.
+    pub fn set_type_mode(&mut self, type_name: String, mode: PersistMode) {
+        self.persist_modes.insert(type_name, mode);
+    }
+
+    /// Gets the persistence mode for a specific type.
+    pub fn get_type_mode(&self, type_name: &str) -> PersistMode {
+        self.persist_modes.get(type_name).copied().unwrap_or(PersistMode::Dev)
+    }
 }
 
 /// Plugin for automatic persistence.
@@ -303,13 +425,22 @@ impl PersistManager {
 /// # Example
 ///
 /// ```ignore
-/// app.add_plugins(PersistPlugin::default());
-/// // Or with custom file path:
-/// app.add_plugins(PersistPlugin::new("save_data.ron"));
+/// // Recommended: Always provide app info for proper paths
+/// app.add_plugins(
+///     PersistPlugin::new("MyCompany", "MyGame")
+/// );
+/// 
+/// // Optional: Disable auto-save for manual control
+/// app.add_plugins(
+///     PersistPlugin::new("MyCompany", "MyGame")
+///         .with_auto_save(false)
+/// );
 /// ```
 pub struct PersistPlugin {
-    /// Path to the persistence file
-    pub file_path: String,
+    /// Organization name (e.g., "MyCompany")
+    pub organization: String,
+    /// Application name (e.g., "MyGame")
+    pub app_name: String,
     /// Whether to enable auto-save on changes
     pub auto_save: bool,
 }
@@ -317,17 +448,23 @@ pub struct PersistPlugin {
 impl Default for PersistPlugin {
     fn default() -> Self {
         Self {
-            file_path: "settings.ron".to_string(),
+            organization: "DefaultOrg".to_string(),
+            app_name: "DefaultApp".to_string(),
             auto_save: true,
         }
     }
 }
 
 impl PersistPlugin {
-    /// Creates a new PersistPlugin with the specified file path.
-    pub fn new(file_path: impl Into<String>) -> Self {
+    /// Creates a new PersistPlugin with organization and app name.
+    /// 
+    /// These are used for:
+    /// - Platform-specific paths in production (e.g., ~/Library/Application Support/MyCompany/MyGame/)
+    /// - Dev file naming (e.g., mygame_dev.ron)
+    pub fn new(organization: impl Into<String>, app_name: impl Into<String>) -> Self {
         Self {
-            file_path: file_path.into(),
+            organization: organization.into(),
+            app_name: app_name.into(),
             auto_save: true,
         }
     }
@@ -341,15 +478,28 @@ impl PersistPlugin {
 
 impl Plugin for PersistPlugin {
     fn build(&self, app: &mut App) {
-        let mut manager = PersistManager::new(self.file_path.clone());
+        let mut manager = PersistManager::new(self.organization.clone(), self.app_name.clone());
         manager.auto_save = self.auto_save;
 
         app.insert_resource(manager);
 
         // Auto-register all Persist types that have been defined
         for registration in inventory::iter::<PersistRegistration> {
-            info!("Auto-registering persist type: {}", registration.type_name);
+            debug!("Auto-registering persist type: {} (mode: {})", registration.type_name, registration.persist_mode);
+            
+            // Call the registration function first to set up the resource and systems
             (registration.register_fn)(app);
+            
+            // Then store the mode for this type
+            if let Some(mut manager) = app.world_mut().get_resource_mut::<PersistManager>() {
+                let mode = match registration.persist_mode {
+                    "embed" => PersistMode::Embed,
+                    "dynamic" => PersistMode::Dynamic,
+                    "secure" => PersistMode::Secure,
+                    _ => PersistMode::Dev,
+                };
+                manager.set_type_mode(registration.type_name.to_string(), mode);
+            }
         }
     }
 }
@@ -374,17 +524,60 @@ pub fn register_persist_type<T: Resource + Persistable + Default>(app: &mut App,
     }
 
     // Add systems for this type
-    app.add_systems(Startup, load_persisted::<T>);
-    app.add_systems(Update, persist_system::<T>);
+    // Load persisted data first in PreStartup
+    app.add_systems(PreStartup, load_persisted::<T>);
+    // Run persist_system in PostUpdate to ensure it runs after all user systems
+    app.add_systems(PostUpdate, persist_system::<T>);
 }
 
 /// Generic system to persist a resource when it changes
 pub fn persist_system<T: Persistable>(mut manager: ResMut<PersistManager>, resource: Res<T>) {
-    if resource.is_changed() && !resource.is_added() {
-        let type_name = T::type_name();
+    let type_name = T::type_name();
+    
+    // Save on any change, even if just added
+    // The load system runs in PreStartup, so if we have user changes in the first frame,
+    // we should save them even though the resource is still marked as "added"
+    if resource.is_changed() {
+        let mode = T::persist_mode();
+        #[allow(unused_variables)]  // Used in feature-gated code
+        let mode = mode;
+
+        // Don't save embedded resources in production
+        #[cfg(feature = "prod")]
+        if mode == PersistMode::Embed {
+            return;
+        }
 
         if manager.is_auto_save_enabled(type_name) {
             let data = resource.to_persist_data();
+            
+            // In production, save to mode-specific paths
+            #[cfg(feature = "prod")]
+            {
+                if mode == PersistMode::Dynamic || mode == PersistMode::Secure {
+                    let path = manager.get_resource_path(type_name, mode);
+                    if !path.as_os_str().is_empty() {
+                        let mut file = PersistFile::new();
+                        file.set_type_data(type_name.to_string(), data);
+                        
+                        // For secure mode, we could add encryption here
+                        #[cfg(feature = "secure")]
+                        if mode == PersistMode::Secure {
+                            // TODO: Add encryption/obfuscation
+                        }
+                        
+                        if let Err(e) = file.save_to_file(&path) {
+                            error!("Failed to save {} to {:?}: {}", type_name, path, e);
+                        } else {
+                            debug!("Saved {} to {:?}", type_name, path);
+                        }
+                        return;
+                    }
+                }
+            }
+            
+            // Default behavior for dev mode
+            debug!("{}: Attempting to save to dev file", type_name);
             manager
                 .get_persist_file_mut()
                 .set_type_data(type_name.to_string(), data);
@@ -392,7 +585,7 @@ pub fn persist_system<T: Persistable>(mut manager: ResMut<PersistManager>, resou
             if let Err(e) = manager.save() {
                 error!("Failed to auto-save {}: {}", type_name, e);
             } else {
-                debug!("Auto-saved {}", type_name);
+                info!("Auto-saved {} to dev file", type_name);
             }
         }
     }
@@ -400,9 +593,58 @@ pub fn persist_system<T: Persistable>(mut manager: ResMut<PersistManager>, resou
 
 /// Load persisted values on startup
 pub fn load_persisted<T: Persistable>(manager: Res<PersistManager>, mut resource: ResMut<T>) {
-    if let Some(data) = manager.get_persist_file().get_type_data(T::type_name()) {
+    let type_name = T::type_name();
+    #[allow(unused_variables)]  // Used in feature-gated code
+    let mode = T::persist_mode();
+    
+    // Try to load embedded data first in production
+    #[cfg(feature = "prod")]
+    if mode == PersistMode::Embed {
+        if let Some(embedded_str) = T::embedded_data() {
+            // Parse the embedded data
+            if embedded_str.ends_with(".ron") || embedded_str.contains("(") {
+                // Looks like RON format
+                if let Ok(file) = ron::from_str::<PersistFile>(embedded_str) {
+                    if let Some(data) = file.get_type_data(type_name) {
+                        resource.load_from_persist_data(data);
+                        info!("Loaded embedded data for {}", type_name);
+                        return;
+                    }
+                }
+            } else {
+                // Try JSON format
+                if let Ok(file) = serde_json::from_str::<PersistFile>(embedded_str) {
+                    if let Some(data) = file.get_type_data(type_name) {
+                        resource.load_from_persist_data(data);
+                        info!("Loaded embedded data for {}", type_name);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+    
+    // Load from disk for dynamic/secure modes in production
+    #[cfg(feature = "prod")]
+    if mode == PersistMode::Dynamic || mode == PersistMode::Secure {
+        let path = manager.get_resource_path(type_name, mode);
+        if !path.as_os_str().is_empty() && path.exists() {
+            if let Ok(file) = PersistFile::load_from_file(&path) {
+                if let Some(data) = file.get_type_data(type_name) {
+                    resource.load_from_persist_data(data);
+                    info!("Loaded {} data for {} from {:?}", 
+                        if mode == PersistMode::Secure { "secure" } else { "dynamic" }, 
+                        type_name, path);
+                    return;
+                }
+            }
+        }
+    }
+    
+    // Default behavior - load from main persist file (dev mode)
+    if let Some(data) = manager.get_persist_file().get_type_data(type_name) {
         resource.load_from_persist_data(data);
-        info!("Loaded persisted data for {}", T::type_name());
+        info!("Loaded persisted data for {}", type_name);
     }
 }
 
@@ -419,11 +661,11 @@ mod tests {
         // Test inserting and retrieving different types
         data.insert("number", 42i32);
         data.insert("text", "hello");
-        data.insert("float", 3.14f64);
+        data.insert("float", std::f64::consts::PI);
 
         assert_eq!(data.get::<i32>("number"), Some(42));
         assert_eq!(data.get::<String>("text"), Some("hello".to_string()));
-        assert_eq!(data.get::<f64>("float"), Some(3.14));
+        assert_eq!(data.get::<f64>("float"), Some(std::f64::consts::PI));
         assert_eq!(data.get::<i32>("nonexistent"), None);
     }
 
@@ -538,22 +780,20 @@ mod tests {
 
     #[test]
     fn test_persist_manager_new() {
-        let temp_dir = TempDir::new().unwrap();
-        let file_path = temp_dir.path().join("manager_test.json");
+        let manager = PersistManager::new("TestOrg", "TestApp");
 
-        let manager = PersistManager::new(&file_path);
-
-        assert_eq!(manager.file_path, file_path);
+        assert_eq!(manager.organization, "TestOrg");
+        assert_eq!(manager.app_name, "TestApp");
         assert!(manager.auto_save);
         assert!(manager.auto_save_types.is_empty());
+        
+        #[cfg(not(feature = "prod"))]
+        assert_eq!(manager.dev_file, PathBuf::from("testapp_dev.ron"));
     }
 
     #[test]
     fn test_persist_manager_auto_save_settings() {
-        let temp_dir = TempDir::new().unwrap();
-        let file_path = temp_dir.path().join("auto_save_test.json");
-
-        let mut manager = PersistManager::new(&file_path);
+        let mut manager = PersistManager::new("TestOrg", "TestApp");
 
         // Test default auto-save
         assert!(manager.is_auto_save_enabled("AnyType"));
@@ -570,28 +810,48 @@ mod tests {
 
     #[test]
     fn test_persist_manager_save_and_load() {
-        let temp_dir = TempDir::new().unwrap();
-        let file_path = temp_dir.path().join("manager_save_load.json");
+        // This test requires being able to control file paths, which is only available in dev mode
+        #[cfg(not(feature = "prod"))]
+        {
+            let temp_dir = TempDir::new().unwrap();
+            
+            // We need to write to a specific file for this test
+            // Create a manager with test org/app
+            let mut manager = PersistManager::new("TestOrg", "TestApp");
+            
+            // For testing, override the dev file path
+            manager.dev_file = temp_dir.path().join("test.ron");
+            
+            let mut data = PersistData::new();
+            data.insert("test", "data");
+            manager
+                .get_persist_file_mut()
+                .set_type_data("TestType".to_string(), data);
 
-        // Create manager and add data
-        let mut manager = PersistManager::new(&file_path);
-        let mut data = PersistData::new();
-        data.insert("test", "data");
-        manager
-            .get_persist_file_mut()
-            .set_type_data("TestType".to_string(), data);
+            // Save
+            manager.save().unwrap();
 
-        // Save
-        manager.save().unwrap();
-
-        // Create new manager and verify data persists
-        let manager2 = PersistManager::new(&file_path);
-        let loaded_data = manager2.get_persist_file().get_type_data("TestType");
-        assert!(loaded_data.is_some());
-        assert_eq!(
-            loaded_data.unwrap().get::<String>("test"),
-            Some("data".to_string())
-        );
+            // Create new manager with same paths and load
+            let mut manager2 = PersistManager::new("TestOrg", "TestApp");
+            manager2.dev_file = temp_dir.path().join("test.ron");
+            manager2.load().unwrap();
+            
+            let loaded_data = manager2.get_persist_file().get_type_data("TestType");
+            assert!(loaded_data.is_some());
+            assert_eq!(
+                loaded_data.unwrap().get::<String>("test"),
+                Some("data".to_string())
+            );
+        }
+        
+        // In production mode, just verify basic manager creation
+        #[cfg(feature = "prod")]
+        {
+            let manager = PersistManager::new("TestOrg", "TestApp");
+            assert_eq!(manager.organization, "TestOrg");
+            assert_eq!(manager.app_name, "TestApp");
+            // Platform-specific save/load testing would require actual directories
+        }
     }
 
     #[test]
@@ -612,14 +872,16 @@ mod tests {
     #[test]
     fn test_persist_plugin_default() {
         let plugin = PersistPlugin::default();
-        assert_eq!(plugin.file_path, "settings.ron");
+        assert_eq!(plugin.organization, "DefaultOrg");
+        assert_eq!(plugin.app_name, "DefaultApp");
         assert!(plugin.auto_save);
     }
 
     #[test]
     fn test_persist_plugin_custom() {
-        let plugin = PersistPlugin::new("custom.json").with_auto_save(false);
-        assert_eq!(plugin.file_path, "custom.json");
+        let plugin = PersistPlugin::new("MyOrg", "MyApp").with_auto_save(false);
+        assert_eq!(plugin.organization, "MyOrg");
+        assert_eq!(plugin.app_name, "MyApp");
         assert!(!plugin.auto_save);
     }
 
@@ -652,7 +914,6 @@ mod tests {
         let mut ron_file = PersistFile::new();
         ron_file.set_type_data("TestType".to_string(), data);
         ron_file.save_to_file(&ron_path).unwrap();
-        let ron_content = fs::read_to_string(&ron_path).unwrap();
 
         // RON and JSON will have different formatting
         // Just verify both can be loaded back correctly

@@ -19,6 +19,8 @@ fn impl_persist(input: &DeriveInput) -> SynResult<proc_macro2::TokenStream> {
     // Parse persist attributes if any
     let mut auto_save = true;
     let mut persist_file = None;
+    let mut persist_mode = "dev".to_string(); // default mode
+    let mut embed_file = None;
 
     for attr in &input.attrs {
         if attr.path().is_ident("persist") {
@@ -31,6 +33,23 @@ fn impl_persist(input: &DeriveInput) -> SynResult<proc_macro2::TokenStream> {
                     meta.input.parse::<syn::Token![=]>()?;
                     let lit: syn::LitStr = meta.input.parse()?;
                     persist_file = Some(lit.value());
+                } else if meta.path.is_ident("mode") {
+                    meta.input.parse::<syn::Token![=]>()?;
+                    let lit: syn::LitStr = meta.input.parse()?;
+                    persist_mode = lit.value();
+                } else if meta.path.is_ident("embed") {
+                    // For embedded resources, specify the file to embed
+                    if meta.input.peek(syn::Token![=]) {
+                        meta.input.parse::<syn::Token![=]>()?;
+                        let lit: syn::LitStr = meta.input.parse()?;
+                        embed_file = Some(lit.value());
+                    } else {
+                        persist_mode = "embed".to_string();
+                    }
+                } else if meta.path.is_ident("dynamic") {
+                    persist_mode = "dynamic".to_string();
+                } else if meta.path.is_ident("secure") {
+                    persist_mode = "secure".to_string();
                 }
                 Ok(())
             })?;
@@ -38,11 +57,38 @@ fn impl_persist(input: &DeriveInput) -> SynResult<proc_macro2::TokenStream> {
     }
 
     let type_name_str = name.to_string();
+    let persist_mode_str = persist_mode.clone();
+
+    // Generate embedded data if in embed mode
+    let embedded_data = if persist_mode == "embed" {
+        if let Some(ref file_path) = embed_file {
+            quote! {
+                Some(include_str!(#file_path))
+            }
+        } else {
+            quote! { None }
+        }
+    } else {
+        quote! { None }
+    };
 
     let expanded = quote! {
         impl #impl_generics bevy_persist::Persistable for #name #ty_generics #where_clause {
             fn type_name() -> &'static str {
                 #type_name_str
+            }
+
+            fn persist_mode() -> bevy_persist::PersistMode {
+                match #persist_mode_str {
+                    "embed" => bevy_persist::PersistMode::Embed,
+                    "dynamic" => bevy_persist::PersistMode::Dynamic,
+                    "secure" => bevy_persist::PersistMode::Secure,
+                    _ => bevy_persist::PersistMode::Dev,
+                }
+            }
+
+            fn embedded_data() -> Option<&'static str> {
+                #embedded_data
             }
 
             fn to_persist_data(&self) -> bevy_persist::PersistData {
@@ -70,6 +116,7 @@ fn impl_persist(input: &DeriveInput) -> SynResult<proc_macro2::TokenStream> {
         bevy_persist::inventory::submit! {
             bevy_persist::PersistRegistration {
                 type_name: #type_name_str,
+                persist_mode: #persist_mode_str,
                 auto_save: #auto_save,
                 register_fn: |app: &mut bevy::prelude::App| {
                     bevy_persist::register_persist_type::<#name #ty_generics>(app, #auto_save);

@@ -58,17 +58,13 @@ fn test_derive_macro_with_attributes() {
 
 #[test]
 fn test_plugin_integration() {
-    let temp_dir = TempDir::new().unwrap();
-    let file_path = temp_dir.path().join("test_settings.json");
-
     // Create an app with the plugin
     let mut app = App::new();
     app.add_plugins(MinimalPlugins);
-    app.add_plugins(PersistPlugin::new(file_path.to_str().unwrap()));
+    app.add_plugins(PersistPlugin::new("TestOrg", "TestApp"));
 
-    // Initialize resources
-    app.init_resource::<TestSettings>();
-    app.init_resource::<ManualSaveSettings>();
+    // Resources are auto-registered by the derive macro
+    // No need to manually init_resource
 
     // Run startup systems to load any existing data
     app.finish();
@@ -77,7 +73,7 @@ fn test_plugin_integration() {
     // Verify the manager was created
     assert!(app.world().get_resource::<PersistManager>().is_some());
 
-    // Verify resources were initialized
+    // Verify resources were initialized by auto-registration
     assert!(app.world().get_resource::<TestSettings>().is_some());
     assert!(app.world().get_resource::<ManualSaveSettings>().is_some());
 }
@@ -110,53 +106,84 @@ fn test_auto_save_integration() {
 
 #[test]
 fn test_manual_save_integration() {
-    let temp_dir = TempDir::new().unwrap();
-    let file_path = temp_dir.path().join("manual_save_test.json");
-
-    // Create first app instance
+    // This test requires persistent storage between app instances
+    // In production mode, this would use platform directories which may not be writable in tests
+    // So we only run this test in dev mode where we use local files
+    #[cfg(not(feature = "prod"))]
     {
-        let mut app = App::new();
-        app.add_plugins(MinimalPlugins);
-        app.add_plugins(PersistPlugin::new(file_path.to_str().unwrap()));
-        app.init_resource::<ManualSaveSettings>();
+        // Both app instances need to use the same org/app name to share data
+        let org = "TestOrg";
+        let app_name = "ManualSaveTest";
 
-        app.finish();
-
-        // Modify the resource
-        let mut settings = app.world_mut().resource_mut::<ManualSaveSettings>();
-        settings.value = 999;
-        settings.text = "manual save".to_string();
-        settings.set_changed();
-
-        // Run update - should NOT auto-save due to auto_save = false
-        app.update();
-
-        // Manually save
+        // Create first app instance
         {
+            let mut app = App::new();
+            app.add_plugins(MinimalPlugins);
+            app.add_plugins(PersistPlugin::new(org, app_name));
+
+            app.finish();
+
+            // Modify the resource
+            let mut settings = app.world_mut().resource_mut::<ManualSaveSettings>();
+            settings.value = 999;
+            settings.text = "manual save".to_string();
+            settings.set_changed();
+
+            // Run update - should NOT auto-save due to auto_save = false
+            app.update();
+
+            // Manually save
+            {
+                let settings = app.world().resource::<ManualSaveSettings>();
+                let data = settings.to_persist_data();
+                let mut manager = app.world_mut().resource_mut::<PersistManager>();
+                manager
+                    .get_persist_file_mut()
+                    .set_type_data("ManualSaveSettings".to_string(), data);
+                manager.save().unwrap();
+            }
+        }
+
+        // Create second app instance to verify persistence
+        {
+            let mut app = App::new();
+            app.add_plugins(MinimalPlugins);
+            app.add_plugins(PersistPlugin::new(org, app_name));
+
+            app.finish();
+            app.update();
+
+            // Verify the data was loaded
             let settings = app.world().resource::<ManualSaveSettings>();
-            let data = settings.to_persist_data();
-            let mut manager = app.world_mut().resource_mut::<PersistManager>();
-            manager
-                .get_persist_file_mut()
-                .set_type_data("ManualSaveSettings".to_string(), data);
-            manager.save().unwrap();
+            assert_eq!(settings.value, 999);
+            assert_eq!(settings.text, "manual save");
         }
     }
-
-    // Create second app instance to verify persistence
+    
+    // In production mode, just verify that manual save settings don't auto-save
+    #[cfg(feature = "prod")]
     {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
-        app.add_plugins(PersistPlugin::new(file_path.to_str().unwrap()));
-        app.init_resource::<ManualSaveSettings>();
+        app.add_plugins(PersistPlugin::new("TestOrg", "ManualSaveTest"));
 
         app.finish();
-        app.update();
 
-        // Verify the data was loaded
+        // Verify ManualSaveSettings resource exists and has correct default
         let settings = app.world().resource::<ManualSaveSettings>();
-        assert_eq!(settings.value, 999);
-        assert_eq!(settings.text, "manual save");
+        assert_eq!(settings.value, 0); // Default value
+        assert_eq!(settings.text, "");  // Default value
+        
+        // Modify and verify it doesn't auto-save
+        let mut settings = app.world_mut().resource_mut::<ManualSaveSettings>();
+        settings.value = 123;
+        settings.set_changed();
+        
+        // Run update - should NOT auto-save due to auto_save = false attribute
+        app.update();
+        
+        // If we had a way to check, the file shouldn't exist since we didn't manually save
+        // But in prod mode without controlling paths, we can't easily verify this
     }
 }
 
@@ -224,4 +251,104 @@ fn test_ron_format() {
         assert_eq!(data.get::<String>("name"), Some("ron_test".to_string()));
         assert_eq!(data.get::<bool>("enabled"), Some(true));
     }
+}
+
+// Tests for new features added with production support
+
+#[derive(Resource, Default, Serialize, Deserialize, Persist, Debug, PartialEq, Clone)]
+#[persist(dynamic)]
+struct DynamicSettings {
+    user_pref: String,
+    volume: f32,
+}
+
+#[derive(Resource, Default, Serialize, Deserialize, Persist, Debug, PartialEq, Clone)]
+#[persist(secure)]
+struct SecureSettings {
+    save_data: i32,
+    secret: String,
+}
+
+#[test]
+fn test_persist_mode_trait_implementation() {
+    // Test that the persist mode is correctly set for different resource types
+    assert_eq!(TestSettings::persist_mode(), PersistMode::Dev);
+    assert_eq!(DynamicSettings::persist_mode(), PersistMode::Dynamic);
+    assert_eq!(SecureSettings::persist_mode(), PersistMode::Secure);
+}
+
+#[test]
+fn test_persist_manager_new_api() {
+    let manager = PersistManager::new("TestOrganization", "TestApplication");
+    assert_eq!(manager.organization, "TestOrganization");
+    assert_eq!(manager.app_name, "TestApplication");
+    assert!(manager.auto_save);
+    
+    #[cfg(not(feature = "prod"))]
+    assert_eq!(manager.dev_file, std::path::PathBuf::from("testapplication_dev.ron"));
+}
+
+#[test]
+fn test_persist_plugin_new_api() {
+    let plugin = PersistPlugin::new("MyCompany", "MyGame");
+    assert_eq!(plugin.organization, "MyCompany");
+    assert_eq!(plugin.app_name, "MyGame");
+    assert!(plugin.auto_save);
+    
+    let plugin_no_save = plugin.with_auto_save(false);
+    assert!(!plugin_no_save.auto_save);
+}
+
+#[test]
+fn test_resource_path_generation() {
+    let manager = PersistManager::new("TestOrg", "TestApp");
+    
+    #[cfg(not(feature = "prod"))]
+    {
+        // In dev mode, all modes should return the dev file
+        let dev_path = manager.get_resource_path("TestResource", PersistMode::Dev);
+        let dynamic_path = manager.get_resource_path("TestResource", PersistMode::Dynamic);
+        let secure_path = manager.get_resource_path("TestResource", PersistMode::Secure);
+        
+        assert_eq!(dev_path, std::path::PathBuf::from("testapp_dev.ron"));
+        assert_eq!(dynamic_path, dev_path);
+        assert_eq!(secure_path, dev_path);
+    }
+    
+    #[cfg(feature = "prod")]
+    {
+        // In prod mode, different modes should return different paths
+        let embed_path = manager.get_resource_path("TestResource", PersistMode::Embed);
+        assert_eq!(embed_path, std::path::PathBuf::new()); // Empty path for embedded
+        
+        // Dynamic and Secure would use platform directories if available
+        // We can't test exact paths as they depend on the system, but we can check they're different
+        let dynamic_path = manager.get_resource_path("UserSettings", PersistMode::Dynamic);
+        let secure_path = manager.get_resource_path("SaveData", PersistMode::Secure);
+        
+        // At minimum, they should have different extensions
+        if !dynamic_path.as_os_str().is_empty() && !secure_path.as_os_str().is_empty() {
+            assert!(dynamic_path.to_str().unwrap().ends_with(".ron"));
+            assert!(secure_path.to_str().unwrap().ends_with(".dat"));
+        }
+    }
+}
+
+#[test]
+fn test_persist_mode_enum() {
+    // Test the PersistMode enum values
+    let dev = PersistMode::Dev;
+    let embed = PersistMode::Embed;
+    let dynamic = PersistMode::Dynamic;
+    let secure = PersistMode::Secure;
+    
+    assert_ne!(dev, embed);
+    assert_ne!(dynamic, secure);
+    assert_eq!(dev, PersistMode::Dev);
+    
+    // Test Debug trait
+    assert_eq!(format!("{:?}", dev), "Dev");
+    assert_eq!(format!("{:?}", embed), "Embed");
+    assert_eq!(format!("{:?}", dynamic), "Dynamic");
+    assert_eq!(format!("{:?}", secure), "Secure");
 }
