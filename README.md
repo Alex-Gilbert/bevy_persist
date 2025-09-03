@@ -16,7 +16,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-bevy_persist = "0.1"
+bevy_persist = "0.1.0"
 ```
 
 ## Quick Start
@@ -26,8 +26,7 @@ use bevy::prelude::*;
 use bevy_persist::prelude::*;
 use serde::{Deserialize, Serialize};
 
-#[derive(Resource, Reflect, Serialize, Deserialize, Persist)]
-#[persist(path = "settings.json")]
+#[derive(Resource, Default, Serialize, Deserialize, Persist)]
 struct Settings {
     volume: f32,
     difficulty: String,
@@ -36,7 +35,7 @@ struct Settings {
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
-        .add_plugins(PersistPlugin)
+        .add_plugins(PersistPlugin::default())
         .init_resource::<Settings>()
         .run();
 }
@@ -51,6 +50,12 @@ Full documentation is available at [docs.rs/bevy_persist](https://docs.rs/bevy_p
 Check out the `examples/` directory for more usage examples:
 - `basic.rs` - Simple settings persistence
 - `advanced.rs` - Complex game state with multiple persistent resources
+
+Run examples with:
+```bash
+cargo run --example basic
+cargo run --example advanced
+```
 
 ## License
 

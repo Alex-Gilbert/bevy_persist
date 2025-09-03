@@ -6,6 +6,9 @@ authors = ["Alex Gilbert"]
 description = "Automatic persistence for Bevy resources with change detection"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Alex-Gilbert/bevy_persist"
+homepage = "https://github.com/Alex-Gilbert/bevy_persist"
+documentation = "https://docs.rs/bevy_persist"
+readme = "README.md"
 keywords = ["bevy", "gamedev", "persistence", "save", "settings"]
 categories = ["game-development", "config"]
 

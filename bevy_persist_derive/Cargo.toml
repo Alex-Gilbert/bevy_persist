@@ -3,9 +3,12 @@ name = "bevy_persist_derive"
 version = "0.1.0"
 edition = "2021"
 authors = ["Alex Gilbert"]
-description = "Derive macro for bevy_persist"
+description = "Derive macro for bevy_persist - automatic persistence for Bevy resources"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Alex-Gilbert/bevy_persist"
+readme = "README.md"
+keywords = ["bevy", "gamedev", "persistence", "macro"]
+categories = ["game-development"]
 
 [lib]
 proc-macro = true

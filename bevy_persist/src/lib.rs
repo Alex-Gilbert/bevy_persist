@@ -2,6 +2,36 @@
 //!
 //! This crate provides automatic saving and loading of Bevy resources,
 //! with support for multiple serialization formats and change detection.
+//!
+//! # Features
+//!
+//! - **Automatic Save/Load**: Resources are automatically saved when modified and loaded on startup
+//! - **Multiple Formats**: Support for JSON and RON serialization formats
+//! - **Change Detection**: Only saves when resources actually change, minimizing disk I/O
+//! - **Derive Macro**: Simple `#[derive(Persist)]` to make any resource persistent
+//! - **Flexible Configuration**: Customize save paths, formats, and save strategies per resource
+//!
+//! # Quick Start
+//!
+//! ```ignore
+//! use bevy::prelude::*;
+//! use bevy_persist::prelude::*;
+//! use serde::{Deserialize, Serialize};
+//!
+//! #[derive(Resource, Default, Serialize, Deserialize, Persist)]
+//! struct Settings {
+//!     volume: f32,
+//!     difficulty: String,
+//! }
+//!
+//! fn main() {
+//!     App::new()
+//!         .add_plugins(DefaultPlugins)
+//!         .add_plugins(PersistPlugin::default())
+//!         .init_resource::<Settings>()
+//!         .run();
+//! }
+//! ```
 
 use bevy::prelude::*;
 use log::{debug, error, info};
@@ -49,25 +79,31 @@ impl std::fmt::Display for PersistError {
 
 impl std::error::Error for PersistError {}
 
-/// Data structure for persisting parameter values
+/// Data structure for persisting parameter values.
+/// 
+/// This is used internally to store serialized resource data
+/// in a generic format that can be saved to JSON or RON.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistData {
     pub values: HashMap<String, serde_json::Value>,
 }
 
 impl PersistData {
+    /// Creates a new, empty PersistData instance.
     pub fn new() -> Self {
         Self {
             values: HashMap::new(),
         }
     }
 
+    /// Inserts a serializable value with the given key.
     pub fn insert<T: serde::Serialize>(&mut self, key: impl Into<String>, value: T) {
         if let Ok(json_value) = serde_json::to_value(value) {
             self.values.insert(key.into(), json_value);
         }
     }
 
+    /// Retrieves and deserializes a value by key.
     pub fn get<T: serde::de::DeserializeOwned>(&self, key: &str) -> Option<T> {
         self.values
             .get(key)
@@ -81,7 +117,10 @@ impl Default for PersistData {
     }
 }
 
-/// Complete persistence file format
+/// Complete persistence file format.
+/// 
+/// This represents the entire contents of a persistence file,
+/// including all persisted resources, metadata, and versioning information.
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct PersistFile {
     #[serde(flatten)]
@@ -91,6 +130,7 @@ pub struct PersistFile {
 }
 
 impl PersistFile {
+    /// Creates a new PersistFile with current timestamp and version.
     pub fn new() -> Self {
         Self {
             type_data: HashMap::new(),
@@ -99,6 +139,8 @@ impl PersistFile {
         }
     }
 
+    /// Loads a PersistFile from disk. Creates a new one if the file doesn't exist.
+    /// Automatically detects format based on file extension (.ron or .json).
     pub fn load_from_file(path: impl AsRef<Path>) -> PersistResult<Self> {
         let path = path.as_ref();
 
@@ -119,6 +161,8 @@ impl PersistFile {
         }
     }
 
+    /// Saves the PersistFile to disk.
+    /// Format is determined by file extension (.ron for RON, .json for JSON).
     pub fn save_to_file(&mut self, path: impl AsRef<Path>) -> PersistResult<()> {
         let path = path.as_ref();
 
@@ -148,16 +192,21 @@ impl PersistFile {
         Ok(())
     }
 
+    /// Gets the persistence data for a specific type.
     pub fn get_type_data(&self, type_name: &str) -> Option<&PersistData> {
         self.type_data.get(type_name)
     }
 
+    /// Sets the persistence data for a specific type.
     pub fn set_type_data(&mut self, type_name: String, data: PersistData) {
         self.type_data.insert(type_name, data);
     }
 }
 
-/// Trait for types that can be persisted
+/// Trait for types that can be persisted.
+/// 
+/// This trait is typically implemented automatically by the `#[derive(Persist)]` macro.
+/// Manual implementation is possible but not recommended.
 pub trait Persistable: Resource + Serialize + for<'de> Deserialize<'de> {
     /// Get the type name for persistence
     fn type_name() -> &'static str;
@@ -169,7 +218,9 @@ pub trait Persistable: Resource + Serialize + for<'de> Deserialize<'de> {
     fn from_persist_data(&mut self, data: &PersistData);
 }
 
-/// Registration data for auto-discovered Persist types
+/// Registration data for auto-discovered Persist types.
+/// 
+/// Used internally by the derive macro for automatic registration.
 #[derive(Debug)]
 pub struct PersistRegistration {
     pub type_name: &'static str,
@@ -179,7 +230,10 @@ pub struct PersistRegistration {
 
 inventory::collect!(PersistRegistration);
 
-/// Resource that manages persistence
+/// Resource that manages persistence.
+/// 
+/// This resource is automatically added by `PersistPlugin` and handles
+/// all saving and loading operations for persistent resources.
 #[derive(Resource)]
 pub struct PersistManager {
     /// Path to the persistence file
@@ -193,6 +247,7 @@ pub struct PersistManager {
 }
 
 impl PersistManager {
+    /// Creates a new PersistManager with the specified file path.
     pub fn new(file_path: impl Into<PathBuf>) -> Self {
         let file_path = file_path.into();
         let persist_file = PersistFile::load_from_file(&file_path).unwrap_or_else(|e| {
@@ -208,33 +263,50 @@ impl PersistManager {
         }
     }
 
+    /// Saves all persistent data to the file.
     pub fn save(&mut self) -> PersistResult<()> {
         self.persist_file.save_to_file(&self.file_path)
     }
 
+    /// Reloads persistent data from the file.
     pub fn load(&mut self) -> PersistResult<()> {
         self.persist_file = PersistFile::load_from_file(&self.file_path)?;
         Ok(())
     }
 
+    /// Gets a reference to the underlying persist file.
     pub fn get_persist_file(&self) -> &PersistFile {
         &self.persist_file
     }
 
+    /// Gets a mutable reference to the underlying persist file.
     pub fn get_persist_file_mut(&mut self) -> &mut PersistFile {
         &mut self.persist_file
     }
 
+    /// Checks if auto-save is enabled for a specific type.
     pub fn is_auto_save_enabled(&self, type_name: &str) -> bool {
         self.auto_save && self.auto_save_types.get(type_name).copied().unwrap_or(true)
     }
 
+    /// Sets whether auto-save is enabled for a specific type.
     pub fn set_type_auto_save(&mut self, type_name: String, enabled: bool) {
         self.auto_save_types.insert(type_name, enabled);
     }
 }
 
-/// Plugin for automatic persistence
+/// Plugin for automatic persistence.
+/// 
+/// Add this plugin to your Bevy app to enable automatic persistence
+/// for resources marked with `#[derive(Persist)]`.
+/// 
+/// # Example
+/// 
+/// ```ignore
+/// app.add_plugins(PersistPlugin::default());
+/// // Or with custom file path:
+/// app.add_plugins(PersistPlugin::new("save_data.ron"));
+/// ```
 pub struct PersistPlugin {
     /// Path to the persistence file
     pub file_path: String,
@@ -252,6 +324,7 @@ impl Default for PersistPlugin {
 }
 
 impl PersistPlugin {
+    /// Creates a new PersistPlugin with the specified file path.
     pub fn new(file_path: impl Into<String>) -> Self {
         Self {
             file_path: file_path.into(),
@@ -259,6 +332,7 @@ impl PersistPlugin {
         }
     }
 
+    /// Sets whether auto-save is enabled globally.
     pub fn with_auto_save(mut self, enabled: bool) -> Self {
         self.auto_save = enabled;
         self
@@ -280,7 +354,10 @@ impl Plugin for PersistPlugin {
     }
 }
 
-/// Register a Persist type with the system
+/// Register a Persist type with the system.
+/// 
+/// This is called automatically by the derive macro and typically
+/// doesn't need to be called manually.
 pub fn register_persist_type<T: Resource + Persistable + Default>(app: &mut App, auto_save: bool) {
     let type_name = T::type_name();
 

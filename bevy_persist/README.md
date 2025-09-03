@@ -5,29 +5,28 @@ Automatic persistence for Bevy resources with change detection.
 ## Features
 
 - **Automatic Save/Load**: Resources are automatically saved when modified and loaded on startup
-- **Multiple Formats**: Support for JSON and RON serialization formats
+- **Multiple Formats**: Support for JSON and RON serialization formats  
 - **Change Detection**: Only saves when resources actually change, minimizing disk I/O
 - **Derive Macro**: Simple `#[derive(Persist)]` to make any resource persistent
 - **Flexible Configuration**: Customize save paths, formats, and save strategies per resource
 
-## Quick Start
+## Installation
 
 Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-bevy_persist = "0.1"
+bevy_persist = "0.1.0"
 ```
 
-Make a resource persistent:
+## Quick Start
 
 ```rust
 use bevy::prelude::*;
 use bevy_persist::prelude::*;
 use serde::{Deserialize, Serialize};
 
-#[derive(Resource, Reflect, Serialize, Deserialize, Persist)]
-#[persist(path = "settings.json")]
+#[derive(Resource, Default, Serialize, Deserialize, Persist)]
 struct Settings {
     volume: f32,
     difficulty: String,
@@ -44,26 +43,50 @@ fn main() {
 
 ## Advanced Usage
 
-### Custom Save Strategies
+### Manual Save Control
 
 ```rust
-#[derive(Resource, Reflect, Serialize, Deserialize, Persist)]
-#[persist(path = "game_state.ron", format = "ron", strategy = "immediate")]
-struct GameState {
-    level: u32,
-    score: u32,
+#[derive(Resource, Serialize, Deserialize, Persist)]
+#[persist(auto_save = false)]
+struct GraphicsSettings {
+    resolution: (u32, u32),
+    fullscreen: bool,
+}
+
+// Manual save in a system
+fn save_graphics(
+    mut manager: ResMut<PersistManager>,
+    settings: Res<GraphicsSettings>,
+) {
+    if settings.is_changed() {
+        let data = settings.to_persist_data();
+        manager.get_persist_file_mut()
+            .set_type_data("GraphicsSettings".to_string(), data);
+        manager.save().expect("Failed to save");
+    }
 }
 ```
 
-### Multiple Persistent Resources
+### RON Format
+
+Use RON format for more readable configuration files:
 
 ```rust
 App::new()
-    .add_plugins(PersistPlugin)
-    .init_resource::<Settings>()
-    .init_resource::<GameState>()
-    .init_resource::<PlayerProfile>()
-    .run();
+    .add_plugins(PersistPlugin::new("settings.ron"))
+    // ...
+```
+
+## Examples
+
+Check out the `examples/` directory for more usage examples:
+- `basic.rs` - Simple settings persistence
+- `advanced.rs` - Complex game state with multiple persistent resources
+
+Run examples with:
+```bash
+cargo run --example basic
+cargo run --example advanced
 ```
 
 ## License
