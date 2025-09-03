@@ -1,0 +1,11 @@
+{
+    "GameSettings": (
+        values: {
+            "difficulty": 2,
+            "player_name": "",
+            "volume": 1.0,
+        },
+    ),
+    "last_saved": "2025-08-11T18:44:54.512365836+00:00",
+    "version": "0.1.0",
+}

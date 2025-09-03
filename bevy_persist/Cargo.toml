@@ -1,0 +1,31 @@
+[package]
+name = "bevy_persist"
+version = "0.1.0"
+edition = "2021"
+authors = ["Alex Gilbert"]
+description = "Automatic persistence for Bevy resources with change detection"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Alex-Gilbert/bevy_persist"
+keywords = ["bevy", "gamedev", "persistence", "save", "settings"]
+categories = ["game-development", "config"]
+
+[dependencies]
+bevy = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+ron = { workspace = true }
+log = { workspace = true }
+chrono = { workspace = true }
+inventory = { workspace = true }
+bevy_persist_derive = { version = "0.1.0", path = "../bevy_persist_derive" }
+
+[dev-dependencies]
+bevy = { workspace = true, features = ["default"] }
+
+[[example]]
+name = "basic"
+path = "examples/basic.rs"
+
+[[example]]
+name = "advanced"
+path = "examples/advanced.rs"
