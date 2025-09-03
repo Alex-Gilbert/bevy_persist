@@ -10,7 +10,7 @@ struct GameSettings {
 }
 
 #[derive(Resource, Default, Serialize, Deserialize, Persist)]
-#[persist(auto_save = false)]  // This resource won't auto-save
+#[persist(auto_save = false)] // This resource won't auto-save
 struct GraphicsSettings {
     pub resolution: (u32, u32),
     pub fullscreen: bool,
@@ -31,12 +31,15 @@ fn main() {
         .add_plugins(DefaultPlugins)
         .add_plugins(PersistPlugin::new("game_data.ron"))
         .add_systems(Startup, setup)
-        .add_systems(Update, (
-            update_game_settings,
-            update_graphics_settings,
-            update_player_progress,
-            manual_save_system,
-        ))
+        .add_systems(
+            Update,
+            (
+                update_game_settings,
+                update_graphics_settings,
+                update_player_progress,
+                manual_save_system,
+            ),
+        )
         .run();
 }
 
@@ -47,25 +50,25 @@ fn setup(
     player_progress: Res<PlayerProgress>,
 ) {
     commands.spawn(Camera2d);
-    
+
     println!("=== Current Settings ===");
     println!("\nGame Settings:");
     println!("  Volume: {}", game_settings.volume);
     println!("  Difficulty: {}", game_settings.difficulty);
     println!("  Player Name: {}", game_settings.player_name);
-    
+
     println!("\nGraphics Settings (manual save only):");
     println!("  Resolution: {:?}", graphics_settings.resolution);
     println!("  Fullscreen: {}", graphics_settings.fullscreen);
     println!("  VSync: {}", graphics_settings.vsync);
     println!("  Anti-aliasing: {}x", graphics_settings.anti_aliasing);
-    
+
     println!("\nPlayer Progress:");
     println!("  Level: {}", player_progress.level);
     println!("  Experience: {}", player_progress.experience);
     println!("  Gold: {}", player_progress.gold);
     println!("  Unlocked Items: {:?}", player_progress.unlocked_items);
-    
+
     println!("\n=== Controls ===");
     println!("SPACE - Modify game settings (auto-saves)");
     println!("G - Modify graphics settings (no auto-save)");
@@ -73,14 +76,11 @@ fn setup(
     println!("S - Manual save all settings");
 }
 
-fn update_game_settings(
-    mut settings: ResMut<GameSettings>,
-    keyboard: Res<ButtonInput<KeyCode>>,
-) {
+fn update_game_settings(mut settings: ResMut<GameSettings>, keyboard: Res<ButtonInput<KeyCode>>) {
     if keyboard.just_pressed(KeyCode::Space) {
         settings.volume = (settings.volume + 0.1).min(1.0);
         settings.difficulty = (settings.difficulty + 1) % 5;
-        
+
         println!("\n[Auto-saved] Updated game settings:");
         println!("  Volume: {}", settings.volume);
         println!("  Difficulty: {}", settings.difficulty);
@@ -99,7 +99,7 @@ fn update_graphics_settings(
             _ => 0,
         };
         settings.vsync = !settings.vsync;
-        
+
         println!("\n[Not auto-saved] Updated graphics settings:");
         println!("  Anti-aliasing: {}x", settings.anti_aliasing);
         println!("  VSync: {}", settings.vsync);
@@ -120,7 +120,7 @@ fn update_player_progress(
             let new_item = format!("Item_{}", progress.level);
             progress.unlocked_items.push(new_item);
         }
-        
+
         println!("\n[Auto-saved] Updated player progress:");
         println!("  Level: {}", progress.level);
         println!("  Experience: {}", progress.experience);
@@ -139,8 +139,10 @@ fn manual_save_system(
     if keyboard.just_pressed(KeyCode::KeyS) {
         // Manually save graphics settings
         let data = graphics_settings.to_persist_data();
-        manager.get_persist_file_mut().set_type_data("GraphicsSettings".to_string(), data);
-        
+        manager
+            .get_persist_file_mut()
+            .set_type_data("GraphicsSettings".to_string(), data);
+
         if let Err(e) = manager.save() {
             eprintln!("Failed to save: {}", e);
         } else {

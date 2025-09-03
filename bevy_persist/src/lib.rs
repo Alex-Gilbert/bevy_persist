@@ -18,8 +18,8 @@ pub use inventory;
 
 pub mod prelude {
     pub use crate::{
-        Persist, PersistPlugin, Persistable, PersistData, PersistFile,
-        PersistError, PersistResult, PersistManager,
+        Persist, PersistData, PersistError, PersistFile, PersistManager, PersistPlugin,
+        PersistResult, Persistable,
     };
 }
 
@@ -132,11 +132,13 @@ impl PersistFile {
         }
 
         let content = if path.extension().map_or(false, |ext| ext == "ron") {
-            ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::default())
-                .map_err(|e| PersistError::SerializationError(format!("RON serialization error: {}", e)))?
+            ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::default()).map_err(|e| {
+                PersistError::SerializationError(format!("RON serialization error: {}", e))
+            })?
         } else {
-            serde_json::to_string_pretty(self)
-                .map_err(|e| PersistError::SerializationError(format!("JSON serialization error: {}", e)))?
+            serde_json::to_string_pretty(self).map_err(|e| {
+                PersistError::SerializationError(format!("JSON serialization error: {}", e))
+            })?
         };
 
         fs::write(path, content)
@@ -159,10 +161,10 @@ impl PersistFile {
 pub trait Persistable: Resource + Serialize + for<'de> Deserialize<'de> {
     /// Get the type name for persistence
     fn type_name() -> &'static str;
-    
+
     /// Convert to persistence data
     fn to_persist_data(&self) -> PersistData;
-    
+
     /// Load from persistence data
     fn from_persist_data(&mut self, data: &PersistData);
 }
@@ -193,12 +195,11 @@ pub struct PersistManager {
 impl PersistManager {
     pub fn new(file_path: impl Into<PathBuf>) -> Self {
         let file_path = file_path.into();
-        let persist_file = PersistFile::load_from_file(&file_path)
-            .unwrap_or_else(|e| {
-                error!("Failed to load persist file: {}", e);
-                PersistFile::new()
-            });
-        
+        let persist_file = PersistFile::load_from_file(&file_path).unwrap_or_else(|e| {
+            error!("Failed to load persist file: {}", e);
+            PersistFile::new()
+        });
+
         Self {
             file_path,
             persist_file,
@@ -206,28 +207,28 @@ impl PersistManager {
             auto_save_types: HashMap::new(),
         }
     }
-    
+
     pub fn save(&mut self) -> PersistResult<()> {
         self.persist_file.save_to_file(&self.file_path)
     }
-    
+
     pub fn load(&mut self) -> PersistResult<()> {
         self.persist_file = PersistFile::load_from_file(&self.file_path)?;
         Ok(())
     }
-    
+
     pub fn get_persist_file(&self) -> &PersistFile {
         &self.persist_file
     }
-    
+
     pub fn get_persist_file_mut(&mut self) -> &mut PersistFile {
         &mut self.persist_file
     }
-    
+
     pub fn is_auto_save_enabled(&self, type_name: &str) -> bool {
         self.auto_save && self.auto_save_types.get(type_name).copied().unwrap_or(true)
     }
-    
+
     pub fn set_type_auto_save(&mut self, type_name: String, enabled: bool) {
         self.auto_save_types.insert(type_name, enabled);
     }
@@ -257,7 +258,7 @@ impl PersistPlugin {
             auto_save: true,
         }
     }
-    
+
     pub fn with_auto_save(mut self, enabled: bool) -> Self {
         self.auto_save = enabled;
         self
@@ -268,9 +269,9 @@ impl Plugin for PersistPlugin {
     fn build(&self, app: &mut App) {
         let mut manager = PersistManager::new(self.file_path.clone());
         manager.auto_save = self.auto_save;
-        
+
         app.insert_resource(manager);
-        
+
         // Auto-register all Persist types that have been defined
         for registration in inventory::iter::<PersistRegistration> {
             info!("Auto-registering persist type: {}", registration.type_name);
@@ -282,36 +283,35 @@ impl Plugin for PersistPlugin {
 /// Register a Persist type with the system
 pub fn register_persist_type<T: Resource + Persistable + Default>(app: &mut App, auto_save: bool) {
     let type_name = T::type_name();
-    
+
     let world = app.world_mut();
-    
+
     // Ensure resource exists
     if !world.contains_resource::<T>() {
         world.init_resource::<T>();
     }
-    
+
     // Set auto-save preference for this type
     if let Some(mut manager) = world.get_resource_mut::<PersistManager>() {
         manager.set_type_auto_save(type_name.to_string(), auto_save);
     }
-    
+
     // Add systems for this type
     app.add_systems(Startup, load_persisted::<T>);
     app.add_systems(Update, persist_system::<T>);
 }
 
 /// Generic system to persist a resource when it changes
-pub fn persist_system<T: Persistable>(
-    mut manager: ResMut<PersistManager>,
-    resource: Res<T>,
-) {
+pub fn persist_system<T: Persistable>(mut manager: ResMut<PersistManager>, resource: Res<T>) {
     if resource.is_changed() && !resource.is_added() {
         let type_name = T::type_name();
-        
+
         if manager.is_auto_save_enabled(type_name) {
             let data = resource.to_persist_data();
-            manager.get_persist_file_mut().set_type_data(type_name.to_string(), data);
-            
+            manager
+                .get_persist_file_mut()
+                .set_type_data(type_name.to_string(), data);
+
             if let Err(e) = manager.save() {
                 error!("Failed to auto-save {}: {}", type_name, e);
             } else {
@@ -322,10 +322,7 @@ pub fn persist_system<T: Persistable>(
 }
 
 /// Load persisted values on startup
-pub fn load_persisted<T: Persistable>(
-    manager: Res<PersistManager>,
-    mut resource: ResMut<T>,
-) {
+pub fn load_persisted<T: Persistable>(manager: Res<PersistManager>, mut resource: ResMut<T>) {
     if let Some(data) = manager.get_persist_file().get_type_data(T::type_name()) {
         resource.from_persist_data(data);
         info!("Loaded persisted data for {}", T::type_name());
