@@ -255,6 +255,78 @@ fn test_ron_format() {
 
 // Tests for new features added with production support
 
+#[test]
+#[cfg(feature = "secure")]
+fn test_secure_encryption() {
+    use bevy_persist::PersistData;
+    use tempfile::TempDir;
+    use std::fs;
+    
+    // Create a temp directory for testing
+    let temp_dir = TempDir::new().unwrap();
+    let secure_file = temp_dir.path().join("secure_test.dat");
+    
+    // Create a PersistManager with a secret
+    let manager = bevy_persist::PersistManager::new("TestOrg", "TestApp")
+        .with_secret("my_secret_key_123");
+    
+    // Create some test data
+    let mut data = PersistData::new();
+    data.insert("score", 9999i32);
+    data.insert("level", 42i32);
+    data.insert("player_name", "TestPlayer");
+    
+    // Save the data in secure mode
+    manager.save_resource("SecureData", &data, bevy_persist::PersistMode::Secure).unwrap();
+    
+    // Read the encrypted file directly - it should not be readable as plain text
+    let encrypted_contents = fs::read(manager.get_resource_path("SecureData", bevy_persist::PersistMode::Secure)).unwrap();
+    let encrypted_string = String::from_utf8_lossy(&encrypted_contents);
+    
+    // The encrypted data should NOT contain readable strings
+    assert!(!encrypted_string.contains("score"));
+    assert!(!encrypted_string.contains("9999"));
+    assert!(!encrypted_string.contains("TestPlayer"));
+    
+    // Now load the data back using the same secret
+    let loaded_data = manager.load_resource("SecureData", bevy_persist::PersistMode::Secure).unwrap();
+    assert_eq!(loaded_data.get::<i32>("score"), Some(9999));
+    assert_eq!(loaded_data.get::<i32>("level"), Some(42));
+    assert_eq!(loaded_data.get::<String>("player_name"), Some("TestPlayer".to_string()));
+    
+    // Try loading with wrong secret - should fail
+    let wrong_manager = bevy_persist::PersistManager::new("TestOrg", "TestApp")
+        .with_secret("wrong_secret");
+    let load_result = wrong_manager.load_resource("SecureData", bevy_persist::PersistMode::Secure);
+    assert!(load_result.is_err());
+}
+
+#[test]
+#[cfg(feature = "secure")]
+fn test_secure_without_secret() {
+    use bevy_persist::PersistData;
+    use tempfile::TempDir;
+    
+    // Create a temp directory for testing
+    let temp_dir = TempDir::new().unwrap();
+    
+    // Create a PersistManager WITHOUT a secret
+    let manager = bevy_persist::PersistManager::new("TestOrg", "TestApp2");
+    
+    // Create some test data
+    let mut data = PersistData::new();
+    data.insert("value", 123i32);
+    
+    // Save in secure mode without a secret - should use base64 encoding
+    manager.save_resource("SecureData2", &data, bevy_persist::PersistMode::Secure).unwrap();
+    
+    // Load it back - should work since we're using the same (no) secret
+    let loaded_data = manager.load_resource("SecureData2", bevy_persist::PersistMode::Secure).unwrap();
+    assert_eq!(loaded_data.get::<i32>("value"), Some(123));
+}
+
+// Tests for new features added with production support
+
 #[derive(Resource, Default, Serialize, Deserialize, Persist, Debug, PartialEq, Clone)]
 #[persist(dynamic)]
 struct DynamicSettings {

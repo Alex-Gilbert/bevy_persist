@@ -12,6 +12,7 @@ Automatic persistence for Bevy resources with change detection.
 - **Production Ready**: Different persistence modes for development vs production
 - **Platform Support**: Automatic platform-specific paths for user data
 - **Embedded Resources**: Compile tweaked values directly into your binary
+- **Encryption Support**: Optional AES-256-GCM encryption for secure save data
 
 ## Installation
 
@@ -38,10 +39,31 @@ struct Settings {
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
-        .add_plugins(PersistPlugin::default())
-        .init_resource::<Settings>()
+        .add_plugins(
+            PersistPlugin::new("MyCompany", "MyGame")
+        )
         .run();
 }
+```
+
+### Secure Encryption
+
+For sensitive save data, use the `secure` feature to enable AES-256-GCM encryption:
+
+```rust
+#[derive(Resource, Default, Serialize, Deserialize, Persist)]
+#[cfg_attr(feature = "secure", persist(secure))]
+struct SaveGame {
+    level: u32,
+    score: u32,
+    unlocked_items: Vec<String>,
+}
+
+// In your app setup:
+.add_plugins(
+    PersistPlugin::new("MyCompany", "MyGame")
+        .with_secret("your_secret_key") // Required for encryption
+)
 ```
 
 ## Production Usage
@@ -52,7 +74,7 @@ bevy_persist is designed primarily as a development tool for tweaking game param
 - **Production Mode**: Different persistence strategies for different types of data:
   - `#[persist(embed)]` - Embed tweaked values into the binary (game balance, level data)
   - `#[persist(dynamic)]` - Save to platform-specific user directories (settings, preferences) 
-  - `#[persist(secure)]` - Protected save data (game progress, achievements)
+  - `#[persist(secure)]` - Encrypted save data with AES-256-GCM (game progress, achievements)
 
 See [PRODUCTION.md](PRODUCTION.md) for detailed production usage guide.
 
@@ -64,8 +86,7 @@ Full documentation is available at [docs.rs/bevy_persist](https://docs.rs/bevy_p
 
 Check out the `examples/` directory for more usage examples:
 - `basic.rs` - Simple settings persistence
-- `advanced.rs` - Complex game state with multiple persistent resources  
-- `production.rs` - Development vs production persistence modes
+- `advanced.rs` - All persistence modes including encryption
 
 Run examples with:
 ```bash
@@ -73,7 +94,10 @@ cargo run --example basic
 cargo run --example advanced
 
 # Test production mode
-cargo run --example production --no-default-features --features prod
+cargo run --example advanced --no-default-features --features prod
+
+# Test production with encryption
+cargo run --example advanced --no-default-features --features prod,secure
 ```
 
 ## CI/CD

@@ -46,6 +46,11 @@ fn main() {
     let mut app = App::new();
     
     // Production-ready configuration
+    #[cfg(feature = "secure")]
+    let persist_plugin = PersistPlugin::new("ExampleStudio", "AdvancedGame")
+        .with_secret("demo_secret_2024"); // In production, derive from hardware ID or user account
+    
+    #[cfg(not(feature = "secure"))]
     let persist_plugin = PersistPlugin::new("ExampleStudio", "AdvancedGame");
     
     app.add_plugins(MinimalPlugins)
@@ -71,6 +76,9 @@ fn main() {
         println!("📦 PRODUCTION MODE:");
         println!("  • Game Balance: Embedded from game_balance.ron (read-only)");
         println!("  • User Preferences: Saved to user config directory");
+        #[cfg(feature = "secure")]
+        println!("  • Player Progress: Encrypted with AES-256-GCM (.dat file)");
+        #[cfg(not(feature = "secure"))]
         println!("  • Player Progress: Saved to user data directory (protected)");
         println!("\nProper separation of concerns for shipping!");
     }

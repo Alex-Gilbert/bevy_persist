@@ -43,7 +43,12 @@ use std::path::{Path, PathBuf};
 #[cfg(feature = "prod")]
 use directories::ProjectDirs;
 #[cfg(feature = "secure")]
-use sha2::{Digest, Sha256};
+use aes_gcm::{
+    aead::{Aead, KeyInit, OsRng},
+    Aes256Gcm, Key, Nonce,
+};
+#[cfg(feature = "secure")]
+use argon2::Argon2;
 
 // Re-export the derive macro
 pub use bevy_persist_derive::Persist;
@@ -70,6 +75,9 @@ pub enum PersistError {
     SerializationError(String),
     /// Resource not found
     ResourceNotFound(String),
+    /// Failed to encrypt/decrypt data
+    #[cfg(feature = "secure")]
+    EncryptionError(String),
 }
 
 impl std::fmt::Display for PersistError {
@@ -78,6 +86,8 @@ impl std::fmt::Display for PersistError {
             Self::IoError(e) => write!(f, "IO error: {}", e),
             Self::SerializationError(e) => write!(f, "Serialization error: {}", e),
             Self::ResourceNotFound(e) => write!(f, "Resource not found: {}", e),
+            #[cfg(feature = "secure")]
+            Self::EncryptionError(e) => write!(f, "Encryption error: {}", e),
         }
     }
 }
@@ -279,6 +289,9 @@ pub struct PersistManager {
     auto_save_types: HashMap<String, bool>,
     /// Track persistence modes for types
     persist_modes: HashMap<String, PersistMode>,
+    /// Secret for encrypting secure persistence (optional)
+    #[cfg(feature = "secure")]
+    secret: Option<String>,
 }
 
 impl PersistManager {
@@ -309,9 +322,100 @@ impl PersistManager {
             auto_save: true,
             auto_save_types: HashMap::new(),
             persist_modes: HashMap::new(),
+            #[cfg(feature = "secure")]
+            secret: None,
         }
     }
 
+    /// Set the secret for encrypting secure persistence
+    #[cfg(feature = "secure")]
+    pub fn with_secret(mut self, secret: impl Into<String>) -> Self {
+        self.secret = Some(secret.into());
+        self
+    }
+    
+    /// Derive an encryption key from the secret and a salt
+    #[cfg(feature = "secure")]
+    fn derive_key(&self, salt: &[u8]) -> Option<[u8; 32]> {
+        if let Some(secret) = &self.secret {
+            let mut key = [0u8; 32];
+            // Use Argon2 to derive a key from the secret
+            let argon2 = Argon2::default();
+            argon2.hash_password_into(secret.as_bytes(), salt, &mut key).ok()?;
+            Some(key)
+        } else {
+            None
+        }
+    }
+    
+    /// Encrypt data for secure persistence
+    #[cfg(feature = "secure")]
+    fn encrypt_data(&self, data: &[u8]) -> PersistResult<Vec<u8>> {
+        use aes_gcm::aead::rand_core::RngCore;
+        
+        if self.secret.is_none() {
+            return Err(PersistError::EncryptionError("No secret configured for secure persistence".to_string()));
+        }
+        
+        // Generate a random salt and nonce
+        let mut salt = [0u8; 16];
+        let mut nonce_bytes = [0u8; 12];
+        let mut rng = aes_gcm::aead::OsRng;
+        rng.fill_bytes(&mut salt);
+        rng.fill_bytes(&mut nonce_bytes);
+        
+        // Derive key from secret
+        let key = self.derive_key(&salt)
+            .ok_or_else(|| PersistError::EncryptionError("Failed to derive encryption key".to_string()))?;
+        
+        // Encrypt using AES-256-GCM
+        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key));
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        
+        let ciphertext = cipher
+            .encrypt(nonce, data)
+            .map_err(|e| PersistError::EncryptionError(format!("Encryption failed: {}", e)))?;
+        
+        // Prepend salt and nonce to the ciphertext
+        let mut result = Vec::with_capacity(salt.len() + nonce_bytes.len() + ciphertext.len());
+        result.extend_from_slice(&salt);
+        result.extend_from_slice(&nonce_bytes);
+        result.extend_from_slice(&ciphertext);
+        
+        Ok(result)
+    }
+    
+    /// Decrypt data from secure persistence
+    #[cfg(feature = "secure")]
+    fn decrypt_data(&self, encrypted: &[u8]) -> PersistResult<Vec<u8>> {
+        if self.secret.is_none() {
+            return Err(PersistError::EncryptionError("No secret configured for secure persistence".to_string()));
+        }
+        
+        if encrypted.len() < 28 { // 16 (salt) + 12 (nonce)
+            return Err(PersistError::EncryptionError("Invalid encrypted data format".to_string()));
+        }
+        
+        // Extract salt, nonce, and ciphertext
+        let salt = &encrypted[0..16];
+        let nonce_bytes = &encrypted[16..28];
+        let ciphertext = &encrypted[28..];
+        
+        // Derive key from secret
+        let key = self.derive_key(salt)
+            .ok_or_else(|| PersistError::EncryptionError("Failed to derive decryption key".to_string()))?;
+        
+        // Decrypt using AES-256-GCM
+        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key));
+        let nonce = Nonce::from_slice(nonce_bytes);
+        
+        let plaintext = cipher
+            .decrypt(nonce, ciphertext)
+            .map_err(|e| PersistError::EncryptionError(format!("Decryption failed: {}", e)))?;
+        
+        Ok(plaintext)
+    }
+    
     /// Get the appropriate path for a resource based on its mode
     pub fn get_resource_path(&self, type_name: &str, mode: PersistMode) -> PathBuf {
         #[cfg(feature = "prod")]
@@ -415,6 +519,102 @@ impl PersistManager {
     pub fn get_type_mode(&self, type_name: &str) -> PersistMode {
         self.persist_modes.get(type_name).copied().unwrap_or(PersistMode::Dev)
     }
+    
+    /// Save a resource to disk based on its persistence mode
+    #[cfg(feature = "prod")]
+    pub fn save_resource(&self, type_name: &str, data: &PersistData, mode: PersistMode) -> PersistResult<()> {
+        match mode {
+            PersistMode::Embed => {
+                // Embedded resources don't save in production
+                Ok(())
+            }
+            PersistMode::Secure => {
+                #[cfg(feature = "secure")]
+                {
+                    // Serialize to RON first
+                    let ron_string = ron::to_string(data)
+                        .map_err(|e| PersistError::SerializationError(e.to_string()))?;
+                    
+                    // Encrypt the data if secret is available
+                    let final_data = if self.secret.is_some() {
+                        self.encrypt_data(ron_string.as_bytes())?
+                    } else {
+                        // If no secret, just obfuscate with base64
+                        use base64::{Engine as _, engine::general_purpose};
+                        general_purpose::STANDARD.encode(ron_string.as_bytes()).into_bytes()
+                    };
+                    
+                    // Write to .dat file
+                    let path = self.get_resource_path(type_name, mode);
+                    fs::write(&path, final_data)
+                        .map_err(|e| PersistError::IoError(format!("Failed to write secure file {}: {}", path.display(), e)))?;
+                    Ok(())
+                }
+                #[cfg(not(feature = "secure"))]
+                {
+                    // Without secure feature, fall back to dynamic
+                    self.save_resource(type_name, data, PersistMode::Dynamic)
+                }
+            }
+            _ => {
+                // Dynamic and Dev modes save as RON
+                let path = self.get_resource_path(type_name, mode);
+                let ron_string = ron::ser::to_string_pretty(data, ron::ser::PrettyConfig::default())
+                    .map_err(|e| PersistError::SerializationError(e.to_string()))?;
+                fs::write(&path, ron_string)
+                    .map_err(|e| PersistError::IoError(format!("Failed to write file {}: {}", path.display(), e)))?;
+                Ok(())
+            }
+        }
+    }
+    
+    /// Load a resource from disk based on its persistence mode
+    #[cfg(feature = "prod")]
+    pub fn load_resource(&self, type_name: &str, mode: PersistMode) -> PersistResult<PersistData> {
+        match mode {
+            PersistMode::Embed => {
+                // This should be handled by embedded_data() in the Persist trait
+                Err(PersistError::ResourceNotFound(format!("Embedded resource {} should use embedded_data()", type_name)))
+            }
+            PersistMode::Secure => {
+                #[cfg(feature = "secure")]
+                {
+                    let path = self.get_resource_path(type_name, mode);
+                    let encrypted = fs::read(&path)
+                        .map_err(|e| PersistError::IoError(format!("Failed to read secure file {}: {}", path.display(), e)))?;
+                    
+                    // Decrypt the data if secret is available
+                    let ron_bytes = if self.secret.is_some() {
+                        self.decrypt_data(&encrypted)?
+                    } else {
+                        // If no secret, assume it's just base64 encoded
+                        use base64::{Engine as _, engine::general_purpose};
+                        general_purpose::STANDARD.decode(&encrypted)
+                            .map_err(|e| PersistError::EncryptionError(format!("Failed to decode base64: {}", e)))?
+                    };
+                    
+                    // Deserialize from RON
+                    let ron_string = String::from_utf8(ron_bytes)
+                        .map_err(|e| PersistError::SerializationError(format!("Invalid UTF-8 in decrypted data: {}", e)))?;
+                    ron::from_str(&ron_string)
+                        .map_err(|e| PersistError::SerializationError(e.to_string()))
+                }
+                #[cfg(not(feature = "secure"))]
+                {
+                    // Without secure feature, fall back to dynamic
+                    self.load_resource(type_name, PersistMode::Dynamic)
+                }
+            }
+            _ => {
+                // Dynamic and Dev modes load as RON
+                let path = self.get_resource_path(type_name, mode);
+                let contents = fs::read_to_string(&path)
+                    .map_err(|e| PersistError::IoError(format!("Failed to read file {}: {}", path.display(), e)))?;
+                ron::from_str(&contents)
+                    .map_err(|e| PersistError::SerializationError(e.to_string()))
+            }
+        }
+    }
 }
 
 /// Plugin for automatic persistence.
@@ -443,6 +643,9 @@ pub struct PersistPlugin {
     pub app_name: String,
     /// Whether to enable auto-save on changes
     pub auto_save: bool,
+    /// Secret for encrypting secure persistence (optional)
+    #[cfg(feature = "secure")]
+    secret: Option<String>,
 }
 
 impl Default for PersistPlugin {
@@ -451,6 +654,8 @@ impl Default for PersistPlugin {
             organization: "DefaultOrg".to_string(),
             app_name: "DefaultApp".to_string(),
             auto_save: true,
+            #[cfg(feature = "secure")]
+            secret: None,
         }
     }
 }
@@ -466,6 +671,8 @@ impl PersistPlugin {
             organization: organization.into(),
             app_name: app_name.into(),
             auto_save: true,
+            #[cfg(feature = "secure")]
+            secret: None,
         }
     }
 
@@ -474,12 +681,24 @@ impl PersistPlugin {
         self.auto_save = enabled;
         self
     }
+    
+    /// Sets the secret for encrypting secure persistence
+    #[cfg(feature = "secure")]
+    pub fn with_secret(mut self, secret: impl Into<String>) -> Self {
+        self.secret = Some(secret.into());
+        self
+    }
 }
 
 impl Plugin for PersistPlugin {
     fn build(&self, app: &mut App) {
         let mut manager = PersistManager::new(self.organization.clone(), self.app_name.clone());
         manager.auto_save = self.auto_save;
+        
+        #[cfg(feature = "secure")]
+        if let Some(secret) = &self.secret {
+            manager = manager.with_secret(secret.clone());
+        }
 
         app.insert_resource(manager);
 
