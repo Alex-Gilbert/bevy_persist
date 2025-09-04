@@ -2,6 +2,7 @@
 name = "bevy_persist"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.75"
 authors = ["Alex Gilbert"]
 description = "Automatic persistence for Bevy resources with change detection"
 license = "MIT OR Apache-2.0"

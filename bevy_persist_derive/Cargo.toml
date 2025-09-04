@@ -2,6 +2,7 @@
 name = "bevy_persist_derive"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.75"
 authors = ["Alex Gilbert"]
 description = "Derive macro for bevy_persist - automatic persistence for Bevy resources"
 license = "MIT OR Apache-2.0"

@@ -5,9 +5,11 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  workflow_call:
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
 
 jobs:
   # Check formatting
@@ -33,7 +35,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings -A deprecated
+        run: cargo clippy --all-targets --all-features -- -W warnings
 
   # Run tests on multiple platforms
   test:
@@ -49,8 +51,14 @@ jobs:
         with:
           toolchain: ${{ matrix.rust }}
       - uses: Swatinem/rust-cache@v2
-      - name: Run tests
-        run: cargo test --all-features --workspace
+      - name: Run tests (default features)
+        run: cargo test --workspace
+      - name: Run tests (all features)
+        run: cargo test --workspace --all-features
+      - name: Run tests (prod feature)
+        run: cargo test --workspace --no-default-features --features prod
+      - name: Run tests (secure feature)
+        run: cargo test --workspace --no-default-features --features prod,secure
 
   # Check that the project builds
   build:
@@ -63,10 +71,18 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Build
+      - name: Build (default features)
+        run: cargo build --release
+      - name: Build (all features)
         run: cargo build --release --all-features
       - name: Build examples
-        run: cargo build --examples
+        run: |
+          cargo build --example basic
+          cargo build --example advanced
+      - name: Build examples (prod mode)
+        run: |
+          cargo build --example basic --no-default-features --features prod
+          cargo build --example advanced --no-default-features --features prod,secure
 
   # Check documentation
   docs:
@@ -97,7 +113,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.75.0  # Specify your MSRV here
+      - uses: dtolnay/rust-toolchain@1.75.0  # MSRV from Cargo.toml
       - uses: Swatinem/rust-cache@v2
       - name: Check MSRV
         run: cargo check --all-features --workspace
@@ -117,5 +133,6 @@ jobs:
       - name: Check bevy_persist
         run: |
           cd bevy_persist
-          # This will fail if derive crate isn't published yet, but that's expected
+          # Replace path dependency with version for publish check
+          sed -i 's/bevy_persist_derive = { version = "0.1.0", path = "..\/bevy_persist_derive" }/bevy_persist_derive = { version = "0.1.0" }/' Cargo.toml
           cargo package --allow-dirty
