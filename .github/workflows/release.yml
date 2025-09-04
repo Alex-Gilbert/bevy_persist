@@ -24,7 +24,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       
       - name: Determine version
         id: version
@@ -64,7 +64,7 @@ jobs:
     needs: create-release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       
       - uses: dtolnay/rust-toolchain@stable
       
@@ -85,7 +85,7 @@ jobs:
     needs: [create-release, publish-derive]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       
       - uses: dtolnay/rust-toolchain@stable
       
@@ -123,7 +123,7 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'push'  # Only on tag push, not manual dispatch
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: main
       
