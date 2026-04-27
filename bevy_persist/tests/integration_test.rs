@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use bevy_persist::prelude::*;
+use bevy_persist::{prelude::*, storage::create_storage};
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
 
@@ -82,6 +82,7 @@ fn test_plugin_integration() {
 fn test_auto_save_integration() {
     let temp_dir = TempDir::new().unwrap();
     let file_path = temp_dir.path().join("auto_save_test.json");
+    let storage = create_storage();
 
     // Create first app instance and manually save
     {
@@ -91,12 +92,12 @@ fn test_auto_save_integration() {
         data.insert("name", "modified");
         data.insert("enabled", false);
         persist_file.set_type_data("TestSettings".to_string(), data);
-        persist_file.save_to_file(&file_path).unwrap();
+        persist_file.save_to_file(&file_path, &storage).unwrap();
     }
 
     // Load and verify
     {
-        let loaded = PersistFile::load_from_file(&file_path).unwrap();
+        let loaded = PersistFile::load_from_file(&file_path, &storage).unwrap();
         let data = loaded.get_type_data("TestSettings").unwrap();
         assert_eq!(data.get::<f32>("volume"), Some(0.75));
         assert_eq!(data.get::<String>("name"), Some("modified".to_string()));
@@ -191,6 +192,7 @@ fn test_manual_save_integration() {
 fn test_multiple_resources() {
     let temp_dir = TempDir::new().unwrap();
     let file_path = temp_dir.path().join("multiple_resources.json");
+    let storage = create_storage();
 
     // Create and save multiple resources
     {
@@ -207,12 +209,12 @@ fn test_multiple_resources() {
         data2.insert("text", "resource2");
         persist_file.set_type_data("ManualSaveSettings".to_string(), data2);
 
-        persist_file.save_to_file(&file_path).unwrap();
+        persist_file.save_to_file(&file_path, &storage).unwrap();
     }
 
     // Load and verify both resources
     {
-        let loaded = PersistFile::load_from_file(&file_path).unwrap();
+        let loaded = PersistFile::load_from_file(&file_path, &storage).unwrap();
 
         let data1 = loaded.get_type_data("TestSettings").unwrap();
         assert_eq!(data1.get::<f32>("volume"), Some(0.9));
@@ -228,6 +230,7 @@ fn test_multiple_resources() {
 fn test_ron_format() {
     let temp_dir = TempDir::new().unwrap();
     let file_path = temp_dir.path().join("test_settings.ron");
+    let storage = create_storage();
 
     // Save with RON format
     {
@@ -237,7 +240,7 @@ fn test_ron_format() {
         data.insert("name", "ron_test");
         data.insert("enabled", true);
         persist_file.set_type_data("TestSettings".to_string(), data);
-        persist_file.save_to_file(&file_path).unwrap();
+        persist_file.save_to_file(&file_path, &storage).unwrap();
     }
 
     // Verify file exists and can be loaded
@@ -245,7 +248,7 @@ fn test_ron_format() {
 
     // Load from RON format
     {
-        let loaded = PersistFile::load_from_file(&file_path).unwrap();
+        let loaded = PersistFile::load_from_file(&file_path, &storage).unwrap();
         let data = loaded.get_type_data("TestSettings").unwrap();
         assert_eq!(data.get::<f32>("volume"), Some(0.33));
         assert_eq!(data.get::<String>("name"), Some("ron_test".to_string()));

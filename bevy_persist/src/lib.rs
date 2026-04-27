@@ -37,8 +37,10 @@ use bevy::{ecs::component::Mutable, prelude::*};
 use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs;
 use std::path::{Path, PathBuf};
+
+pub mod storage;
+use storage::{create_storage, Storage};
 
 #[cfg(feature = "secure")]
 use aes_gcm::{
@@ -55,6 +57,12 @@ pub use bevy_persist_derive::Persist;
 
 // For auto-registration
 pub use inventory;
+
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+use crate::storage::WasmStorage;
+
+#[cfg(not(all(feature = "wasm", target_arch = "wasm32")))]
+use crate::storage::FileSystemStorage;
 
 pub mod prelude {
     pub use crate::{
@@ -156,15 +164,17 @@ impl PersistFile {
 
     /// Loads a PersistFile from disk. Creates a new one if the file doesn't exist.
     /// Automatically detects format based on file extension (.ron or .json).
-    pub fn load_from_file(path: impl AsRef<Path>) -> PersistResult<Self> {
+    pub fn load_from_file<S: Storage>(path: impl AsRef<Path>, storage: &S) -> PersistResult<Self> {
         let path = path.as_ref();
 
-        if !path.exists() {
+        if !storage.exists(path.to_str().unwrap_or("")) {
             return Ok(Self::new());
         }
 
-        let content = fs::read_to_string(path)
-            .map_err(|e| PersistError::IoError(format!("Failed to read file: {}", e)))?;
+        let content = storage
+            .read_text(path.to_str().unwrap_or(""))
+            .map_err(|e| PersistError::IoError(format!("Failed to read file: {}", e)))?
+            .ok_or_else(|| PersistError::IoError("File not found".to_string()))?;
 
         // Try RON first, fallback to JSON
         if path.extension().is_some_and(|ext| ext == "ron") {
@@ -178,7 +188,11 @@ impl PersistFile {
 
     /// Saves the PersistFile to disk.
     /// Format is determined by file extension (.ron for RON, .json for JSON).
-    pub fn save_to_file(&mut self, path: impl AsRef<Path>) -> PersistResult<()> {
+    pub fn save_to_file<S: Storage>(
+        &mut self,
+        path: impl AsRef<Path>,
+        storage: &S,
+    ) -> PersistResult<()> {
         let path = path.as_ref();
 
         // Update timestamp
@@ -186,7 +200,8 @@ impl PersistFile {
 
         // Create parent directory if needed
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
+            storage
+                .create_dir(parent.to_str().unwrap_or(""))
                 .map_err(|e| PersistError::IoError(format!("Failed to create directory: {}", e)))?;
         }
 
@@ -200,7 +215,8 @@ impl PersistFile {
             })?
         };
 
-        fs::write(path, content)
+        storage
+            .write_text(path.to_str().unwrap_or(""), &content)
             .map_err(|e| PersistError::IoError(format!("Failed to write file: {}", e)))?;
 
         debug!("Saved settings to {}", path.display());
@@ -238,7 +254,9 @@ pub enum PersistMode {
 ///
 /// Persisted resources must remain mutable in Bevy 0.19 because loading data at startup
 /// requires mutable resource access.
-pub trait Persistable: Resource<Mutability = Mutable> + Serialize + for<'de> Deserialize<'de> {
+pub trait Persistable:
+    Resource<Mutability = Mutable> + Serialize + for<'de> Deserialize<'de>
+{
     /// Get the type name for persistence
     fn type_name() -> &'static str;
 
@@ -298,6 +316,11 @@ pub struct PersistManager {
     /// Secret for encrypting secure persistence (optional)
     #[cfg(feature = "secure")]
     secret: Option<String>,
+    /// Storage backend (filesystem or browser storage)
+    #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+    pub storage: WasmStorage,
+    #[cfg(not(all(feature = "wasm", target_arch = "wasm32")))]
+    pub storage: FileSystemStorage,
 }
 
 impl PersistManager {
@@ -305,6 +328,7 @@ impl PersistManager {
     pub fn new(organization: impl Into<String>, app_name: impl Into<String>) -> Self {
         let organization = organization.into();
         let app_name = app_name.into();
+        let storage = create_storage();
 
         // In dev mode, load from the dev file if it exists
         #[cfg(not(feature = "prod"))]
@@ -314,7 +338,7 @@ impl PersistManager {
         ));
 
         #[cfg(not(feature = "prod"))]
-        let persist_file = PersistFile::load_from_file(&dev_file).unwrap_or_else(|e| {
+        let persist_file = PersistFile::load_from_file(&dev_file, &storage).unwrap_or_else(|e| {
             debug!("No existing dev file found: {}", e);
             PersistFile::new()
         });
@@ -334,6 +358,7 @@ impl PersistManager {
             embed_files: HashMap::new(),
             #[cfg(feature = "secure")]
             secret: None,
+            storage,
         }
     }
 
@@ -455,7 +480,9 @@ impl PersistManager {
                         ProjectDirs::from("", &self.organization, &self.app_name)
                     {
                         let config_dir = proj_dirs.config_dir();
-                        fs::create_dir_all(config_dir).ok();
+                        self.storage
+                            .create_dir(config_dir.to_str().unwrap_or(""))
+                            .ok();
                         config_dir.join(format!("{}.ron", type_name.to_lowercase()))
                     } else {
                         // Fallback to current directory if platform dirs unavailable
@@ -467,7 +494,9 @@ impl PersistManager {
                         ProjectDirs::from("", &self.organization, &self.app_name)
                     {
                         let data_dir = proj_dirs.data_dir();
-                        fs::create_dir_all(data_dir).ok();
+                        self.storage
+                            .create_dir(data_dir.to_str().unwrap_or(""))
+                            .ok();
                         data_dir.join(format!("{}.dat", type_name.to_lowercase()))
                     } else {
                         // Fallback to current directory if platform dirs unavailable
@@ -491,7 +520,9 @@ impl PersistManager {
     /// Saves all persistent data to the file.
     pub fn save(&mut self) -> PersistResult<()> {
         #[cfg(not(feature = "prod"))]
-        return self.persist_file.save_to_file(&self.dev_file);
+        return self
+            .persist_file
+            .save_to_file(&self.dev_file, &self.storage);
 
         #[cfg(feature = "prod")]
         {
@@ -500,7 +531,8 @@ impl PersistManager {
                 "{}_dev.ron",
                 self.app_name.to_lowercase().replace(" ", "_")
             ));
-            self.persist_file.save_to_file(&fallback_path)
+            self.persist_file
+                .save_to_file(&fallback_path, &self.storage)
         }
     }
 
@@ -508,7 +540,7 @@ impl PersistManager {
     pub fn load(&mut self) -> PersistResult<()> {
         #[cfg(not(feature = "prod"))]
         {
-            self.persist_file = PersistFile::load_from_file(&self.dev_file)?;
+            self.persist_file = PersistFile::load_from_file(&self.dev_file, &self.storage)?;
             Ok(())
         }
 
@@ -519,7 +551,7 @@ impl PersistManager {
                 "{}_dev.ron",
                 self.app_name.to_lowercase().replace(" ", "_")
             ));
-            self.persist_file = PersistFile::load_from_file(&fallback_path)?;
+            self.persist_file = PersistFile::load_from_file(&fallback_path, &self.storage)?;
             Ok(())
         }
     }
@@ -556,12 +588,12 @@ impl PersistManager {
             .copied()
             .unwrap_or(PersistMode::Dev)
     }
-    
+
     /// Sets the embed file path for a specific type.
     pub fn set_type_embed_file(&mut self, type_name: String, file_path: String) {
         self.embed_files.insert(type_name, file_path);
     }
-    
+
     /// Gets the embed file path for a specific type.
     pub fn get_type_embed_file(&self, type_name: &str) -> Option<&String> {
         self.embed_files.get(type_name)
@@ -587,7 +619,6 @@ impl PersistManager {
                     let ron_string = ron::to_string(data)
                         .map_err(|e| PersistError::SerializationError(e.to_string()))?;
 
-                    // Encrypt the data if secret is available
                     let final_data = if self.secret.is_some() {
                         self.encrypt_data(ron_string.as_bytes())?
                     } else {
@@ -600,13 +631,16 @@ impl PersistManager {
 
                     // Write to .dat file
                     let path = self.get_resource_path(type_name, mode);
-                    fs::write(&path, final_data).map_err(|e| {
-                        PersistError::IoError(format!(
-                            "Failed to write secure file {}: {}",
-                            path.display(),
-                            e
-                        ))
-                    })?;
+                    let path_str = path.to_str().unwrap_or("");
+                    self.storage
+                        .write_bytes(path_str, &final_data)
+                        .map_err(|e| {
+                            PersistError::IoError(format!(
+                                "Failed to write secure file {}: {}",
+                                path.display(),
+                                e
+                            ))
+                        })?;
                     Ok(())
                 }
                 #[cfg(not(feature = "secure"))]
@@ -621,9 +655,16 @@ impl PersistManager {
                 let ron_string =
                     ron::ser::to_string_pretty(data, ron::ser::PrettyConfig::default())
                         .map_err(|e| PersistError::SerializationError(e.to_string()))?;
-                fs::write(&path, ron_string).map_err(|e| {
-                    PersistError::IoError(format!("Failed to write file {}: {}", path.display(), e))
-                })?;
+                let path_str = path.to_str().unwrap_or("");
+                self.storage
+                    .write_text(path_str, &ron_string)
+                    .map_err(|e| {
+                        PersistError::IoError(format!(
+                            "Failed to write file {}: {}",
+                            path.display(),
+                            e
+                        ))
+                    })?;
                 Ok(())
             }
         }
@@ -644,23 +685,38 @@ impl PersistManager {
                 #[cfg(feature = "secure")]
                 {
                     let path = self.get_resource_path(type_name, mode);
-                    let encrypted = fs::read(&path).map_err(|e| {
-                        PersistError::IoError(format!(
-                            "Failed to read secure file {}: {}",
-                            path.display(),
-                            e
-                        ))
-                    })?;
+                    let path_str = path.to_str().unwrap_or("");
+                    let stored = self
+                        .storage
+                        .read_bytes(path_str)
+                        .map_err(|e| {
+                            PersistError::IoError(format!(
+                                "Failed to read secure file {}: {}",
+                                path.display(),
+                                e
+                            ))
+                        })?
+                        .ok_or_else(|| {
+                            PersistError::IoError(format!(
+                                "Secure file not found: {}",
+                                path.display()
+                            ))
+                        })?;
 
                     // Decrypt the data if secret is available
                     let ron_bytes = if self.secret.is_some() {
-                        self.decrypt_data(&encrypted)?
+                        self.decrypt_data(&stored)?
                     } else {
                         // If no secret, assume it's just base64 encoded
                         use base64::{engine::general_purpose, Engine as _};
-                        general_purpose::STANDARD.decode(&encrypted).map_err(|e| {
-                            PersistError::EncryptionError(format!("Failed to decode base64: {}", e))
-                        })?
+                        general_purpose::STANDARD
+                            .decode(stored.as_slice())
+                            .map_err(|e| {
+                                PersistError::EncryptionError(format!(
+                                    "Failed to decode base64: {}",
+                                    e
+                                ))
+                            })?
                     };
 
                     // Deserialize from RON
@@ -682,9 +738,20 @@ impl PersistManager {
             _ => {
                 // Dynamic and Dev modes load as RON
                 let path = self.get_resource_path(type_name, mode);
-                let contents = fs::read_to_string(&path).map_err(|e| {
-                    PersistError::IoError(format!("Failed to read file {}: {}", path.display(), e))
-                })?;
+                let path_str = path.to_str().unwrap_or("");
+                let contents = self
+                    .storage
+                    .read_text(path_str)
+                    .map_err(|e| {
+                        PersistError::IoError(format!(
+                            "Failed to read file {}: {}",
+                            path.display(),
+                            e
+                        ))
+                    })?
+                    .ok_or_else(|| {
+                        PersistError::IoError(format!("File not found: {}", path.display()))
+                    })?;
                 ron::from_str(&contents)
                     .map_err(|e| PersistError::SerializationError(e.to_string()))
             }
@@ -796,10 +863,13 @@ impl Plugin for PersistPlugin {
                     _ => PersistMode::Dev,
                 };
                 manager.set_type_mode(registration.type_name.to_string(), mode);
-                
+
                 // Store embed file path if specified
                 if let Some(embed_file) = registration.embed_file {
-                    manager.set_type_embed_file(registration.type_name.to_string(), embed_file.to_string());
+                    manager.set_type_embed_file(
+                        registration.type_name.to_string(),
+                        embed_file.to_string(),
+                    );
                 }
             }
         }
@@ -867,7 +937,7 @@ pub fn persist_system<T: Persistable>(mut manager: ResMut<PersistManager>, resou
                             // TODO: Add encryption/obfuscation
                         }
 
-                        if let Err(e) = file.save_to_file(&path) {
+                        if let Err(e) = file.save_to_file(&path, &manager.storage) {
                             error!("Failed to save {} to {:?}: {}", type_name, path, e);
                         } else {
                             debug!("Saved {} to {:?}", type_name, path);
@@ -879,40 +949,50 @@ pub fn persist_system<T: Persistable>(mut manager: ResMut<PersistManager>, resou
 
             // Default behavior for dev mode
             debug!("{}: Attempting to save to dev file", type_name);
-            
+
             // In dev mode, if this resource will be embedded in prod, also save it to a separate file
             #[cfg(not(feature = "prod"))]
             if mode == PersistMode::Embed {
                 // For embed resources in dev mode, save to assets/persist/ directory
                 // This follows Bevy conventions and makes files easy to find
-                
+
                 // Use environment variable if set, otherwise use default relative path
                 // Users can set BEVY_ASSET_ROOT or CARGO_MANIFEST_DIR for custom paths
                 let base_path = std::env::var("BEVY_ASSET_ROOT")
                     .or_else(|_| std::env::var("CARGO_MANIFEST_DIR"))
                     .map(PathBuf::from)
                     .unwrap_or_else(|_| PathBuf::from("."));
-                
-                let embed_file_name = format!("{}.ron", type_name.to_lowercase().replace("::", "_"));
-                let embed_path = base_path.join("assets").join("persist").join(embed_file_name);
-                
+
+                let embed_file_name =
+                    format!("{}.ron", type_name.to_lowercase().replace("::", "_"));
+                let embed_path = base_path
+                    .join("assets")
+                    .join("persist")
+                    .join(embed_file_name);
+
                 // Create the persist directory if it doesn't exist
                 if let Some(parent) = embed_path.parent() {
-                    if let Err(e) = fs::create_dir_all(parent) {
+                    if let Err(e) = manager.storage.create_dir(parent.to_str().unwrap_or("")) {
                         error!("Failed to create persist directory {:?}: {}", parent, e);
                     }
                 }
-                
+
                 let mut embed_file = PersistFile::new();
                 embed_file.set_type_data(type_name.to_string(), data.clone());
-                
-                if let Err(e) = embed_file.save_to_file(&embed_path) {
-                    error!("Failed to save {} to embed file {:?}: {}", type_name, embed_path, e);
+
+                if let Err(e) = embed_file.save_to_file(&embed_path, &manager.storage) {
+                    error!(
+                        "Failed to save {} to embed file {:?}: {}",
+                        type_name, embed_path, e
+                    );
                 } else {
-                    info!("Saved {} to embed file {:?} for production embedding", type_name, embed_path);
+                    info!(
+                        "Saved {} to embed file {:?} for production embedding",
+                        type_name, embed_path
+                    );
                 }
             }
-            
+
             // Also save to the main dev file for hot-reloading
             manager
                 .get_persist_file_mut()
@@ -965,7 +1045,7 @@ pub fn load_persisted<T: Persistable>(manager: Res<PersistManager>, mut resource
     if mode == PersistMode::Dynamic || mode == PersistMode::Secure {
         let path = manager.get_resource_path(type_name, mode);
         if !path.as_os_str().is_empty() && path.exists() {
-            if let Ok(file) = PersistFile::load_from_file(&path) {
+            if let Ok(file) = PersistFile::load_from_file(&path, &manager.storage) {
                 if let Some(data) = file.get_type_data(type_name) {
                     resource.load_from_persist_data(data);
                     info!(
@@ -992,13 +1072,16 @@ pub fn load_persisted<T: Persistable>(manager: Res<PersistManager>, mut resource
             .or_else(|_| std::env::var("CARGO_MANIFEST_DIR"))
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("."));
-        
+
         let embed_file_name = format!("{}.ron", type_name.to_lowercase().replace("::", "_"));
-        let embed_path = base_path.join("assets").join("persist").join(embed_file_name);
-        
+        let embed_path = base_path
+            .join("assets")
+            .join("persist")
+            .join(embed_file_name);
+
         if embed_path.exists() {
             // Load from the embed file if it exists
-            if let Ok(file) = PersistFile::load_from_file(&embed_path) {
+            if let Ok(file) = PersistFile::load_from_file(&embed_path, &manager.storage) {
                 if let Some(data) = file.get_type_data(type_name) {
                     resource.load_from_persist_data(data);
                     info!("Loaded {} from embed file: {:?}", type_name, embed_path);
@@ -1006,10 +1089,13 @@ pub fn load_persisted<T: Persistable>(manager: Res<PersistManager>, mut resource
                 }
             }
         } else {
-            debug!("Embed file {:?} does not exist, will be created on first save", embed_path);
+            debug!(
+                "Embed file {:?} does not exist, will be created on first save",
+                embed_path
+            );
         }
     }
-    
+
     // Default behavior - load from main persist file (dev mode)
     if let Some(data) = manager.get_persist_file().get_type_data(type_name) {
         resource.load_from_persist_data(data);
@@ -1020,7 +1106,6 @@ pub fn load_persisted<T: Persistable>(manager: Res<PersistManager>, mut resource
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
     use tempfile::TempDir;
 
     #[test]
@@ -1089,6 +1174,7 @@ mod tests {
     fn test_persist_file_save_and_load_json() {
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("test.json");
+        let storage = create_storage();
 
         // Create and save a file
         let mut file = PersistFile::new();
@@ -1097,10 +1183,10 @@ mod tests {
         data.insert("key2", 42);
         file.set_type_data("TestResource".to_string(), data);
 
-        file.save_to_file(&file_path).unwrap();
+        file.save_to_file(&file_path, &storage).unwrap();
 
         // Load the file back
-        let loaded = PersistFile::load_from_file(&file_path).unwrap();
+        let loaded = PersistFile::load_from_file(&file_path, &storage).unwrap();
 
         assert_eq!(loaded.type_data.len(), 1);
         let loaded_data = loaded.get_type_data("TestResource").unwrap();
@@ -1114,6 +1200,7 @@ mod tests {
     #[test]
     fn test_persist_file_save_and_load_ron() {
         let temp_dir = TempDir::new().unwrap();
+        let storage = create_storage();
         let file_path = temp_dir.path().join("test.ron");
 
         // Create and save a file
@@ -1123,10 +1210,10 @@ mod tests {
         data.insert("count", 100);
         file.set_type_data("RonResource".to_string(), data);
 
-        file.save_to_file(&file_path).unwrap();
+        file.save_to_file(&file_path, &storage).unwrap();
 
         // Load the file back
-        let loaded = PersistFile::load_from_file(&file_path).unwrap();
+        let loaded = PersistFile::load_from_file(&file_path, &storage).unwrap();
 
         assert_eq!(loaded.type_data.len(), 1);
         let loaded_data = loaded.get_type_data("RonResource").unwrap();
@@ -1140,10 +1227,11 @@ mod tests {
     #[test]
     fn test_persist_file_load_nonexistent() {
         let temp_dir = TempDir::new().unwrap();
+        let storage = create_storage();
         let file_path = temp_dir.path().join("nonexistent.json");
 
         // Should return a new file when loading nonexistent
-        let file = PersistFile::load_from_file(&file_path).unwrap();
+        let file = PersistFile::load_from_file(&file_path, &storage).unwrap();
         assert!(file.type_data.is_empty());
     }
 
@@ -1260,9 +1348,13 @@ mod tests {
         assert!(data.values.is_empty());
     }
 
+    #[cfg(not(all(feature = "wasm", target_arch = "wasm32")))]
     #[test]
     fn test_persist_file_format_detection() {
+        use storage::FileSystemStorage;
+
         let temp_dir = TempDir::new().unwrap();
+        let storage = FileSystemStorage::new();
 
         // Test JSON format
         let json_path = temp_dir.path().join("test.json");
@@ -1270,8 +1362,11 @@ mod tests {
         let mut data = PersistData::new();
         data.insert("test_key", "test_value");
         json_file.set_type_data("TestType".to_string(), data.clone());
-        json_file.save_to_file(&json_path).unwrap();
-        let content = fs::read_to_string(&json_path).unwrap();
+        json_file.save_to_file(&json_path, &storage).unwrap();
+        let content = storage
+            .read_text(json_path.to_str().unwrap())
+            .unwrap()
+            .unwrap();
         assert!(content.starts_with('{'), "JSON should start with {{");
         assert!(
             content.contains("\"TestType\""),
@@ -1282,12 +1377,12 @@ mod tests {
         let ron_path = temp_dir.path().join("test.ron");
         let mut ron_file = PersistFile::new();
         ron_file.set_type_data("TestType".to_string(), data);
-        ron_file.save_to_file(&ron_path).unwrap();
+        ron_file.save_to_file(&ron_path, &storage).unwrap();
 
         // RON and JSON will have different formatting
         // Just verify both can be loaded back correctly
-        let loaded_json = PersistFile::load_from_file(&json_path).unwrap();
-        let loaded_ron = PersistFile::load_from_file(&ron_path).unwrap();
+        let loaded_json = PersistFile::load_from_file(&json_path, &storage).unwrap();
+        let loaded_ron = PersistFile::load_from_file(&ron_path, &storage).unwrap();
 
         assert!(loaded_json.get_type_data("TestType").is_some());
         assert!(loaded_ron.get_type_data("TestType").is_some());

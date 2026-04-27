@@ -59,7 +59,7 @@ fn impl_persist(input: &DeriveInput) -> SynResult<proc_macro2::TokenStream> {
 
     let type_name_str = name.to_string();
     let persist_mode_str = persist_mode.clone();
-    
+
     // Convert embed_file Option<String> to token stream for static context
     let embed_file_tokens = match embed_file.as_ref() {
         Some(path) => quote! { Some(#path) },
@@ -73,13 +73,14 @@ fn impl_persist(input: &DeriveInput) -> SynResult<proc_macro2::TokenStream> {
         // Auto-generated files are saved in assets/persist/ directory
         // For include_str!, we need a path relative to the source file where the macro is used
         // Most Bevy projects have src/ and assets/ as siblings, so we use ../assets/persist/
-        let file_path = embed_file.as_ref()
-            .map(|s| s.clone())
-            .unwrap_or_else(|| {
-                // Check if we need to use CARGO_MANIFEST_DIR (for workspace members)
-                // Otherwise use ../assets relative path (typical for single crate projects)
-                format!("../assets/persist/{}.ron", type_name_str.to_lowercase().replace("::", "_"))
-            });
+        let file_path = embed_file.as_ref().map(|s| s.clone()).unwrap_or_else(|| {
+            // Check if we need to use CARGO_MANIFEST_DIR (for workspace members)
+            // Otherwise use ../assets relative path (typical for single crate projects)
+            format!(
+                "../assets/persist/{}.ron",
+                type_name_str.to_lowercase().replace("::", "_")
+            )
+        });
         quote! {
             #[cfg(feature = "prod")]
             {
