@@ -33,7 +33,7 @@
 //! }
 //! ```
 
-use bevy::prelude::*;
+use bevy::{ecs::component::Mutable, prelude::*};
 use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -235,7 +235,10 @@ pub enum PersistMode {
 ///
 /// This trait is typically implemented automatically by the `#[derive(Persist)]` macro.
 /// Manual implementation is possible but not recommended.
-pub trait Persistable: Resource + Serialize + for<'de> Deserialize<'de> {
+///
+/// Persisted resources must remain mutable in Bevy 0.19 because loading data at startup
+/// requires mutable resource access.
+pub trait Persistable: Resource<Mutability = Mutable> + Serialize + for<'de> Deserialize<'de> {
     /// Get the type name for persistence
     fn type_name() -> &'static str;
 
@@ -807,7 +810,7 @@ impl Plugin for PersistPlugin {
 ///
 /// This is called automatically by the derive macro and typically
 /// doesn't need to be called manually.
-pub fn register_persist_type<T: Resource + Persistable + Default>(app: &mut App, auto_save: bool) {
+pub fn register_persist_type<T: Persistable + Default>(app: &mut App, auto_save: bool) {
     let type_name = T::type_name();
 
     let world = app.world_mut();
