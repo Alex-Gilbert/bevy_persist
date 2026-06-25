@@ -83,7 +83,7 @@ fn display_settings(settings: Res<UserSettings>) {
     println!("\nSettings auto-save on change!\n");
 }
 
-fn cli_interface(mut settings: ResMut<UserSettings>, mut exit: EventWriter<AppExit>) {
+fn cli_interface(mut settings: ResMut<UserSettings>, mut exit: MessageWriter<AppExit>) {
     print!("> ");
     io::stdout().flush().unwrap();
 
