@@ -151,7 +151,7 @@ fn game_loop(
     mut prefs: ResMut<UserPreferences>,
     mut progress: ResMut<PlayerProgress>,
     mut manager: ResMut<PersistManager>,
-    mut exit: EventWriter<AppExit>,
+    mut exit: MessageWriter<AppExit>,
 ) {
     print!("> ");
     io::stdout().flush().unwrap();
