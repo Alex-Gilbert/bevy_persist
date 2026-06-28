@@ -151,7 +151,7 @@ fn game_loop(
     mut prefs: ResMut<UserPreferences>,
     mut progress: ResMut<PlayerProgress>,
     mut manager: ResMut<PersistManager>,
-    mut exit: EventWriter<AppExit>,
+    mut exit: MessageWriter<AppExit>,
 ) {
     print!("> ");
     io::stdout().flush().unwrap();
@@ -171,10 +171,7 @@ fn game_loop(
                     println!("  Enemy Health: {:.1} (+10)", balance.enemy_health_base);
                     println!("  Player Damage: {:.1} (+5)", balance.player_damage_base);
                     println!("  XP Rate: {:.2}x (-5%)", balance.xp_multiplier);
-                    println!(
-                        "  Rare Drops: {:.1}% (+2%)",
-                        balance.drop_rate_rare * 100.0
-                    );
+                    println!("  Rare Drops: {:.1}% (+2%)", balance.drop_rate_rare * 100.0);
                     println!("\nChanges auto-saved to advancedgame_dev.ron!");
                     println!(
                         "💡 TIP: These values will be embedded when building with --features prod"
@@ -258,7 +255,7 @@ fn game_loop(
                     let mut file = PersistFile::new();
                     file.set_type_data("PlayerProgress".to_string(), data);
 
-                    if let Err(e) = file.save_to_file(&path) {
+                    if let Err(e) = file.save_to_file(&path, &manager.storage) {
                         println!("❌ Failed to save progress: {}", e);
                     } else {
                         println!("✅ Progress saved to secure location: {:?}", path);
